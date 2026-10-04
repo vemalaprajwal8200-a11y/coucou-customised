@@ -43,7 +43,7 @@ installs for the current user only — no admin prompt.
 | Click the small island | It opens |
 | Click Mochi | It gets annoyed. Three times in a row and it goes dizzy |
 | Rest the pointer on Mochi for two seconds | Hearts |
-| Drag a file onto the island | Mochi turns into a box, swallows it, then offers to answer questions about it |
+| Choose a file in Drop or drag one onto the island | Mochi turns into a box, swallows it, then offers to answer questions about it |
 | `Esc` | Closes the island |
 | Tray icon | Open, Settings…, Pause, Quit |
 
@@ -70,9 +70,13 @@ It works from any terminal — Windows Terminal, PowerShell, VS Code, Git Bash.
 
 ## Chat and keys
 
-**Settings… → Claude** takes your Anthropic API key. Keys live in the **Windows
+**Settings… → OpenRouter** takes your OpenRouter API key. Keys live in the **Windows
 Credential Manager**, never on disk and never in the interface — the island can
-only ask whether a key exists. Same for every integration key.
+only ask whether a key exists. Chat defaults to
+`nvidia/nemotron-3-super-120b-a12b:free`. Select a vision-capable model in
+Settings to ask about images or PDFs; those model requests may be billed by
+OpenRouter. Coucou sends plain-text files, images, and PDFs, and reports when a
+file cannot be read or is not supported.
 
 No telemetry. The only network requests Coucou makes are to the services you
 configure yourself.

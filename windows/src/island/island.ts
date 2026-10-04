@@ -106,6 +106,17 @@ export class Island {
   private build() {
     const actions: ViewActions = {
       setView: (v) => this.setView(v),
+      chooseFile: () => {
+        void Bridge.pickFile()
+          .then((path) => {
+            if (path) this.swallow(path);
+          })
+          .catch((err: unknown) => {
+            State.noteMessage = String(err).replace(/^Error:\s*/, "");
+            this.setView("note");
+            Sound.play("error");
+          });
+      },
       collapse: () => this.collapse(),
       setFocus: (id) => {
         State.setFocus(id);
@@ -367,7 +378,14 @@ export class Island {
       }
       case "drop": {
         State.fileDragOver = false;
-        const path = e.paths?.[0];
+        const paths = e.paths ?? [];
+        if (paths.length > 1) {
+          State.noteMessage = "Please choose or drop one file at a time.";
+          this.setView("note");
+          Sound.play("error");
+          return;
+        }
+        const path = paths[0];
         if (!path) {
           this.engine.animateMorph(0);
           this.setView(State.defaultView());

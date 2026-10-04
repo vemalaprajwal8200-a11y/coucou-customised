@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "What Coucou's windows are allowed to do. Everything that touches the OS goes through Coucou's own commands.",
   "windows": ["island", "settings"],
-  "permissions": ["core:default", "autostart:default"]
+  "permissions": ["core:default", "autostart:default", "dialog:allow-open"]
 }

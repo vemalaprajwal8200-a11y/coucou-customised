@@ -174,9 +174,8 @@ function claudeSection(status: HookStatus): HTMLElement {
 // ── Claude API section ────────────────────────────────────────────────────────
 
 const MODELS: [string, string][] = [
-  ["claude-opus-5", "Claude Opus 5"],
-  ["claude-sonnet-5", "Claude Sonnet 5"],
-  ["claude-haiku-4-5", "Claude Haiku 4.5"],
+  ["nvidia/nemotron-3-super-120b-a12b:free", "NVIDIA Nemotron 3 Super 120B A12B (Free)"],
+  ["google/gemini-2.5-flash", "Google Gemini 2.5 Flash (Vision; usage billed)"],
 ];
 
 function apiSection(hasKey: boolean): HTMLElement {
@@ -185,7 +184,7 @@ function apiSection(hasKey: boolean): HTMLElement {
 
   const field = h("input", {
     type: "password",
-    placeholder: hasKey ? "••••••••••••  (stored)" : "sk-ant-...",
+    placeholder: hasKey ? "••••••••••••  (stored)" : "sk-or-v1-...",
     style: "flex:1 1 auto;min-width:0",
     autocomplete: "off",
     spellcheck: "false",
@@ -196,12 +195,12 @@ function apiSection(hasKey: boolean): HTMLElement {
   const feedback = h("div", {});
 
   async function refresh() {
-    const present = (await Bridge.secretPresent("anthropic-api-key")) ?? false;
+    const present = (await Bridge.secretPresent("openrouter-api-key")) ?? false;
     dot.style.background = present ? "#22c55e" : "#f4505e";
     state.textContent = present
       ? "Key saved in the Windows Credential Manager."
       : "No key yet — the chat needs one.";
-    field.placeholder = present ? "••••••••••••  (stored)" : "sk-ant-...";
+    field.placeholder = present ? "••••••••••••  (stored)" : "sk-or-v1-...";
     clearBtn.style.display = present ? "" : "none";
   }
 
@@ -210,7 +209,7 @@ function apiSection(hasKey: boolean): HTMLElement {
     if (!value) return;
     clear(feedback);
     try {
-      await Bridge.secretSet("anthropic-api-key", value);
+      await Bridge.secretSet("openrouter-api-key", value);
       field.value = "";
       feedback.append(h("div", { class: "notice ok", text: "Saved. It never touches disk." }));
       await refresh();
@@ -222,7 +221,7 @@ function apiSection(hasKey: boolean): HTMLElement {
   clearBtn.addEventListener("click", async () => {
     clear(feedback);
     try {
-      await Bridge.secretClear("anthropic-api-key");
+      await Bridge.secretClear("openrouter-api-key");
       feedback.append(h("div", { class: "notice ok", text: "Key removed." }));
       await refresh();
     } catch (err) {
@@ -246,10 +245,11 @@ function apiSection(hasKey: boolean): HTMLElement {
   return h(
     "section",
     {},
-    h("h2", {}, dot, h("span", { text: "Claude" })),
+    h("h2", {}, dot, h("span", { text: "OpenRouter" })),
     state,
-    h("div", { class: "row" }, h("label", { text: "API key" }), field, saveBtn, clearBtn),
+    h("div", { class: "row" }, h("label", { text: "OpenRouter API key" }), field, saveBtn, clearBtn),
     h("div", { class: "row" }, h("label", { text: "Model" }), model),
+    h("p", { class: "hint", text: "Images and PDFs require a vision-capable model. The free default may not support them." }),
     feedback,
   );
 }
@@ -429,7 +429,7 @@ async function main() {
     installed: false, settingsPath: "", hookPath: "", hookReady: false,
   };
 
-  const hasKey = (await Bridge.secretPresent("anthropic-api-key")) ?? false;
+  const hasKey = (await Bridge.secretPresent("openrouter-api-key")) ?? false;
 
   const keys = [
     "stripe-api-key", "github-token", "vercel-token",

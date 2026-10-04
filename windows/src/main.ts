@@ -48,6 +48,9 @@ async function main() {
         if (State.paused) island.fsm.forceHidden();
         else island.reveal();
         break;
+      case "auto-hide":
+        void Bridge.toggleAutoHide();
+        break;
     }
   });
 

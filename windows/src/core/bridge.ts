@@ -5,6 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { open } from "@tauri-apps/plugin-dialog";
 import type { Settings } from "./state";
 
 export const IS_TAURI =
@@ -87,6 +88,12 @@ export const Bridge = {
   chatReset: () => call<void>("chat_reset"),
   /** Copies a dropped file into the inbox. */
   ingestFile: (path: string) => callOrThrow<DroppedFile>("ingest_file", { path }),
+  /** Opens the native file picker; selected files stay on the Rust side. */
+  async pickFile(): Promise<string | null> {
+    if (!IS_TAURI) return null;
+    const selected = await open({ multiple: false, directory: false });
+    return Array.isArray(selected) ? selected[0] ?? null : selected;
+  },
   /** Only ever tells you whether a key exists — never its value. */
   secretPresent: (key: string) => call<boolean>("secret_present", { key }),
   secretSet: (key: string, value: string) => callOrThrow<void>("secret_set", { key, value }),
@@ -99,6 +106,9 @@ export const Bridge = {
 
   /** Tray → Pause. Stops the integration pollers, not just the island. */
   setPaused: (paused: boolean) => call<void>("set_paused", { paused }),
+
+  /** Tray → toggle the native auto-hide state. */
+  toggleAutoHide: () => call<boolean>("toggle_auto_hide"),
 };
 
 export interface IntegrationUpdate {

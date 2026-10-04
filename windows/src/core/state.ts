@@ -90,6 +90,7 @@ export interface Settings {
   screen: "primary" | "cursor";
   autostart: boolean;
   hooksInstalled: boolean;
+  autoHide: boolean;
   /** Claude model used by the chat. */
   model: string;
 }
@@ -105,7 +106,8 @@ export const DEFAULT_SETTINGS: Settings = {
   screen: "primary",
   autostart: false,
   hooksInstalled: false,
-  model: "claude-opus-5",
+  autoHide: true,
+  model: "nvidia/nemotron-3-super-120b-a12b:free",
 };
 
 type Listener = () => void;

@@ -86,16 +86,19 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
     let _ = app.emit("settings-changed", settings);
 }
 
-/// Hidden island → shrink the window to the invisible wake strip and park the
-/// cursor poll; anything else → full panel and 60 Hz polling.
+/// Hidden island → shrink the window to the wake strip. Auto-hide keeps the
+/// global poll running so the fully off-screen window can still be revealed.
 #[tauri::command]
 fn set_collapsed(app: AppHandle, shared: State<Shared>, collapsed: bool) {
     let pref = shared.settings.lock().unwrap().screen.clone();
     shared.gate.collapsed.store(collapsed, Ordering::Relaxed);
     island::apply_geometry(&app, &pref, collapsed);
+    if !collapsed {
+        island::request_auto_reveal(&app, &shared.gate);
+    }
     // The wake strip must always take the mouse, and a resize invalidates the flag.
     island::refresh_click_through(&app, &shared.gate);
-    shared.gate.set_active(!collapsed);
+    shared.gate.set_active(!collapsed || shared.gate.auto_hide_enabled());
 }
 
 /// The front end pushes the island shape; Rust decides click-through from it.
@@ -175,6 +178,19 @@ fn quit_app(app: AppHandle) {
 #[tauri::command]
 fn set_paused(paused: bool) {
     integrations::set_paused(paused);
+}
+
+#[tauri::command]
+fn toggle_auto_hide(app: AppHandle, shared: State<Shared>) -> bool {
+    let settings = {
+        let mut settings = shared.settings.lock().unwrap();
+        settings.auto_hide = !settings.auto_hide;
+        let _ = settings::save(&settings);
+        settings.clone()
+    };
+    island::set_auto_hide_enabled(&app, &shared.gate, settings.auto_hide);
+    let _ = app.emit("settings-changed", settings.clone());
+    settings.auto_hide
 }
 
 // ── Claude Code hooks ─────────────────────────────────────────────────────────
@@ -361,9 +377,10 @@ fn open_settings_window(app: AppHandle) {
 pub fn run() {
     platform::prepare_environment();
     let loaded = settings::load();
-    let gate = Arc::new(PollGate::new());
+    let gate = Arc::new(PollGate::new(loaded.auto_hide));
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             let _ = app.emit_to(island::WINDOW_LABEL, "tray", "open".to_string());
         }))
@@ -401,6 +418,7 @@ pub fn run() {
             open_n8n,
             open_settings_window,
             set_paused,
+            toggle_auto_hide,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -416,9 +434,7 @@ pub fn run() {
             gate.collapsed.store(false, Ordering::Relaxed);
             // Nothing drawn yet, so nothing takes the mouse until the page
             // reports the island's shape.
-            if !platform::CURSOR_POLL {
-                island::refresh_click_through(&handle, &gate);
-            }
+            island::refresh_click_through(&handle, &gate);
             gate.set_active(true);
             island::spawn_cursor_poll(handle.clone(), gate.clone());
 

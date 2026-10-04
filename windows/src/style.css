@@ -971,6 +971,10 @@ input[type="range"]::-webkit-slider-thumb {
   color: #b9bdc4;
 }
 
+.drop-choose {
+  align-self: flex-start;
+}
+
 /* ── Uploading ──────────────────────────────────────────────────────────── */
 
 .up-card {

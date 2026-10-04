@@ -11,16 +11,13 @@ use serde_json::{json, Value};
 
 use crate::secrets;
 
-const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
+const ENDPOINT: &str = "https://openrouter.ai/api/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-/// Server-side fallback: on a policy decline the API retries the same request on
-/// a fallback model inside the same call, so the island never shows a dead end.
-const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 const MAX_TOKENS: u32 = 4096;
 /// Text and code files are inlined; anything larger is skipped, as on macOS.
 const MAX_INLINE_TEXT: u64 = 200_000;
 
-pub const DEFAULT_MODEL: &str = "claude-opus-5";
+pub const DEFAULT_MODEL: &str = "nvidia/nemotron-3-super-120b-a12b:free";
 
 const SYSTEM_PROMPT: &str = "You are Mochi, a personal AI assistant living at the top of the user's screen. \
 You have web search access and can help with absolutely anything — research, coding, finding places, recommendations, tasks, questions. \
@@ -76,7 +73,7 @@ pub async fn send(
     query: String,
     context: Option<ChatContext>,
 ) -> Result<ChatReply, String> {
-    let key = secrets::get("anthropic-api-key")
+    let key = secrets::get("openrouter-api-key")
         .ok_or_else(|| "API key missing. Open settings.".to_string())?;
 
     let mut content: Vec<Value> = Vec::new();
@@ -86,9 +83,7 @@ pub async fn send(
     if chat.is_empty() {
         match &context {
             Some(ChatContext::File { name, path }) => {
-                if let Some(block) = file_block(path) {
-                    content.push(block);
-                }
+                content.push(file_block(path)?);
                 content.push(json!({ "type": "text", "text": format!("File: {name}") }));
             }
             Some(ChatContext::Window { app_name, title, url }) => {
@@ -105,14 +100,7 @@ pub async fn send(
 
     chat.push(json!({ "role": "user", "content": content }));
 
-    let body = json!({
-        "model": model,
-        "max_tokens": MAX_TOKENS,
-        "system": SYSTEM_PROMPT,
-        "tools": [{ "type": "web_search_20260209", "name": "web_search", "max_uses": 5 }],
-        "fallbacks": "default",
-        "messages": chat.snapshot(),
-    });
+    let body = request_body(model, chat.snapshot());
 
     let response = match call(&key, &body).await {
         Ok(v) => v,
@@ -165,9 +153,8 @@ async fn call(key: &str, body: &Value) -> Result<Value, String> {
 
     let response = client
         .post(ENDPOINT)
-        .header("x-api-key", key)
+        .bearer_auth(key)
         .header("anthropic-version", ANTHROPIC_VERSION)
-        .header("anthropic-beta", FALLBACK_BETA)
         .header("content-type", "application/json")
         .json(body)
         .send()
@@ -187,14 +174,39 @@ async fn call(key: &str, body: &Value) -> Result<Value, String> {
                     .map(str::to_string)
             })
             .unwrap_or_else(|| text.chars().take(200).collect());
-        return Err(format!("Claude API {status}: {detail}"));
+        return Err(format!("OpenRouter API {status}: {detail}"));
     }
     serde_json::from_str(&text).map_err(|e| format!("Bad API response: {e}"))
 }
 
+fn openrouter_model(model: &str) -> String {
+    let slug = match model {
+        "claude-haiku-4-5" => "claude-haiku-4.5",
+        other => other,
+    };
+    if slug.contains('/') {
+        slug.to_string()
+    } else {
+        format!("anthropic/{slug}")
+    }
+}
+
+fn request_body(model: &str, messages: Vec<Value>) -> Value {
+    json!({
+        "model": openrouter_model(model),
+        "max_tokens": MAX_TOKENS,
+        "system": SYSTEM_PROMPT,
+        "tools": [{
+            "type": "openrouter:web_search",
+            "parameters": { "max_uses": 5 },
+        }],
+        "messages": messages,
+    })
+}
+
 /// PDF → document block, image → image block, text/code → inline text.
 /// Mirrors readFileAsBlock() in ClaudeService.swift.
-fn file_block(path: &str) -> Option<Value> {
+fn file_block(path: &str) -> Result<Value, String> {
     let ext = std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -211,19 +223,25 @@ fn file_block(path: &str) -> Option<Value> {
     };
 
     if let Some((block_type, media)) = media_type {
-        let bytes = std::fs::read(path).ok()?;
-        return Some(json!({
+        let bytes = std::fs::read(path).map_err(|e| format!("Cannot read attachment: {e}"))?;
+        return Ok(json!({
             "type": block_type,
             "source": { "type": "base64", "media_type": media, "data": base64(&bytes) },
         }));
     }
 
-    let len = std::fs::metadata(path).ok()?.len();
+    let len = std::fs::metadata(path)
+        .map_err(|e| format!("Cannot read attachment: {e}"))?
+        .len();
     if len > MAX_INLINE_TEXT {
-        return None;
+        return Err(format!(
+            "This text file is too large to attach ({} KB maximum).",
+            MAX_INLINE_TEXT / 1024
+        ));
     }
-    let text = std::fs::read_to_string(path).ok()?;
-    Some(json!({ "type": "text", "text": format!("File contents:\n{text}") }))
+    let text = std::fs::read_to_string(path)
+        .map_err(|_| "This file is not a supported text, PDF, or image file.".to_string())?;
+    Ok(json!({ "type": "text", "text": format!("File contents:\n{text}") }))
 }
 
 /// Small standalone base64 encoder — not worth another dependency.
@@ -248,7 +266,25 @@ fn base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::base64;
+    use super::{base64, file_block, openrouter_model, request_body, DEFAULT_MODEL};
+    use std::fs;
+
+    #[test]
+    fn request_uses_nemotron_free_and_openrouter_search() {
+        let body = request_body(DEFAULT_MODEL, Vec::new());
+
+        assert_eq!(body["model"], DEFAULT_MODEL);
+        assert_eq!(body["tools"][0]["type"], "openrouter:web_search");
+        assert_eq!(body["tools"][0]["parameters"]["max_uses"], 5);
+    }
+
+    #[test]
+    fn openrouter_model_uses_provider_slugs() {
+        assert_eq!(openrouter_model("claude-opus-5"), "anthropic/claude-opus-5");
+        assert_eq!(openrouter_model("claude-sonnet-5"), "anthropic/claude-sonnet-5");
+        assert_eq!(openrouter_model("claude-haiku-4-5"), "anthropic/claude-haiku-4.5");
+        assert_eq!(openrouter_model("other/provider-model"), "other/provider-model");
+    }
 
     #[test]
     fn base64_matches_rfc4648_vectors() {
@@ -259,5 +295,37 @@ mod tests {
         assert_eq!(base64(b"foob"), "Zm9vYg==");
         assert_eq!(base64(b"fooba"), "Zm9vYmE=");
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn file_block_reads_text_and_encodes_images() {
+        let dir = std::env::temp_dir().join(format!("coucou-chat-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let text_path = dir.join("note.txt");
+        fs::write(&text_path, "hello").unwrap();
+        let text = file_block(text_path.to_str().unwrap()).unwrap();
+        assert_eq!(text["type"], "text");
+        assert_eq!(text["text"], "File contents:\nhello");
+
+        let image_path = dir.join("pixel.png");
+        fs::write(&image_path, b"png bytes").unwrap();
+        let image = file_block(image_path.to_str().unwrap()).unwrap();
+        assert_eq!(image["type"], "image");
+        assert_eq!(image["source"]["media_type"], "image/png");
+        assert_eq!(image["source"]["data"], base64(b"png bytes"));
+
+        let binary_path = dir.join("document.docx");
+        fs::write(&binary_path, [0xff, 0xfe]).unwrap();
+        assert!(file_block(binary_path.to_str().unwrap())
+            .unwrap_err()
+            .contains("not a supported text"));
+
+        let missing_path = dir.join("missing.txt");
+        assert!(file_block(missing_path.to_str().unwrap())
+            .unwrap_err()
+            .contains("Cannot read attachment"));
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

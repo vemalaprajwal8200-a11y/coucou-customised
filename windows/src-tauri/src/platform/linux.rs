@@ -156,6 +156,10 @@ pub fn cursor_physical() -> Option<(f64, f64)> {
     None
 }
 
+pub fn fullscreen_app_active(_bounds: (i32, i32, u32, u32)) -> bool {
+    false
+}
+
 pub fn left_button_down() -> bool {
     false
 }

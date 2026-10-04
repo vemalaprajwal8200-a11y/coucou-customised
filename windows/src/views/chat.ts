@@ -71,8 +71,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     onHeightChange();
 
     const file = State.droppedFile;
-    const context: ChatContext | null =
-      State.chatHistory.length === 1 && file ? { kind: "file", name: file.name, path: file.path } : null;
+    const context: ChatContext | null = file ? { kind: "file", name: file.name, path: file.path } : null;
 
     try {
       const reply = await Bridge.chatSend(query, context);

@@ -15,8 +15,9 @@ use ::windows::Win32::System::SystemInformation::GetLocalTime;
 use ::windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use ::windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use ::windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, GetClassNameW, GetCursorPos, GetWindowLongPtrW, SetWindowLongPtrW,
-    GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    EnumChildWindows, GetClassNameW, GetCursorPos, GetForegroundWindow, GetShellWindow,
+    GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW,
 };
 
 use super::LocalTime;
@@ -157,6 +158,40 @@ pub fn cursor_physical() -> Option<(f64, f64)> {
     Some((p.x as f64, p.y as f64))
 }
 
+/// True when another foreground window covers the island's entire display.
+pub fn fullscreen_app_active(bounds: (i32, i32, u32, u32)) -> bool {
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.0.is_null()
+        || foreground == unsafe { GetShellWindow() }
+        || is_desktop_shell_window(foreground)
+    {
+        return false;
+    }
+    unsafe {
+        let mut rect = ::windows::Win32::Foundation::RECT::default();
+        if GetWindowRect(foreground, &mut rect).is_err() {
+            return false;
+        }
+        let (left, top, width, height) = bounds;
+        let right = left as i64 + width as i64;
+        let bottom = top as i64 + height as i64;
+        rect.left as i64 <= left as i64 + 2
+            && rect.top as i64 <= top as i64 + 2
+            && rect.right as i64 >= right - 2
+            && rect.bottom as i64 >= bottom - 2
+    }
+}
+
+fn is_desktop_shell_window(hwnd: HWND) -> bool {
+    let mut name = [0u16; 64];
+    let len = unsafe { GetClassNameW(hwnd, &mut name) };
+    len > 0 && is_desktop_shell_class(&String::from_utf16_lossy(&name[..len as usize]))
+}
+
+fn is_desktop_shell_class(name: &str) -> bool {
+    matches!(name, "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd")
+}
+
 /// True while the left mouse button is held — the only signal we get that a
 /// drag might be in flight before it reaches the window.
 pub fn left_button_down() -> bool {
@@ -204,6 +239,19 @@ unsafe extern "system" fn revoke_render_widget(hwnd: HWND, _: LPARAM) -> BOOL {
         }
     }
     true.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_desktop_shell_class;
+
+    #[test]
+    fn desktop_shell_windows_are_not_fullscreen_apps() {
+        for class in ["Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"] {
+            assert!(is_desktop_shell_class(class));
+        }
+        assert!(!is_desktop_shell_class("Chrome_WidgetWin_1"));
+    }
 }
 
 /// WS_EX_NOACTIVATE keeps clicks from stealing focus; WS_EX_TOOLWINDOW keeps the

@@ -16,7 +16,9 @@ pub struct Settings {
     pub screen: String,
     pub autostart: bool,
     pub hooks_installed: bool,
-    /// Claude model used by the chat. Changeable in the settings window.
+    #[serde(default = "default_auto_hide")]
+    pub auto_hide: bool,
+    /// Chat model used by the Windows app. Changeable in the settings window.
     /// Defaulted explicitly so a settings.json written by an older build still loads.
     #[serde(default = "default_model")]
     pub model: String,
@@ -24,6 +26,10 @@ pub struct Settings {
 
 fn default_model() -> String {
     crate::claude::DEFAULT_MODEL.to_string()
+}
+
+fn default_auto_hide() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -42,6 +48,7 @@ impl Default for Settings {
             screen: "primary".into(),
             autostart: false,
             hooks_installed: false,
+            auto_hide: default_auto_hide(),
             model: default_model(),
         }
     }
@@ -58,9 +65,22 @@ fn settings_path() -> PathBuf {
 }
 
 pub fn load() -> Settings {
-    match std::fs::read(settings_path()) {
+    let mut settings = match std::fs::read(settings_path()) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
         Err(_) => Settings::default(),
+    };
+    settings.model = migrate_model(settings.model);
+    settings
+}
+
+fn migrate_model(model: String) -> String {
+    if matches!(
+        model.as_str(),
+        "claude-opus-5" | "claude-sonnet-5" | "claude-haiku-4-5"
+    ) {
+        default_model()
+    } else {
+        model
     }
 }
 
@@ -70,4 +90,29 @@ pub fn save(settings: &Settings) -> std::io::Result<()> {
     let json = serde_json::to_vec_pretty(settings)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(settings_path(), json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{default_auto_hide, default_model, migrate_model};
+
+    #[test]
+    fn default_and_migrated_models_use_nemotron_free() {
+        assert_eq!(default_model(), "nvidia/nemotron-3-super-120b-a12b:free");
+        for old_model in ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"] {
+            assert_eq!(migrate_model(old_model.into()), default_model());
+        }
+    }
+
+    #[test]
+    fn custom_model_preference_is_preserved() {
+        let custom_model = "openai/gpt-model";
+        assert_eq!(migrate_model(custom_model.into()), custom_model);
+    }
+
+    #[test]
+    fn auto_hide_is_enabled_by_default() {
+        assert!(default_auto_hide());
+        assert!(super::Settings::default().auto_hide);
+    }
 }
