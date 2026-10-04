@@ -3,7 +3,7 @@
 // integrations land here too in a later stage.
 
 import "./settings.css";
-import { Bridge, onEvent, type HookStatus } from "../core/bridge";
+import { Bridge, onEvent, type HookStatus, type OpenRouterAccount } from "../core/bridge";
 import { DEFAULT_SETTINGS, type Settings } from "../core/state";
 import { h, clear } from "../views/dom";
 
@@ -178,54 +178,151 @@ const MODELS: [string, string][] = [
   ["google/gemini-2.5-flash", "Google Gemini 2.5 Flash (Vision; usage billed)"],
 ];
 
-function apiSection(hasKey: boolean): HTMLElement {
-  const dot = statusDot(hasKey);
-  const state = h("span", { class: "hint", text: hasKey ? "Key saved in the Windows Credential Manager." : "No key yet — the chat needs one." });
-
-  const field = h("input", {
+function apiSection(initialAccounts: OpenRouterAccount[], accountLoadError?: string): HTMLElement {
+  let accounts = initialAccounts;
+  const dot = statusDot(accounts.length > 0);
+  const state = h("span", { class: "hint" });
+  const feedback = h("div", {});
+  const accountsPanel = h("div", { class: "openrouter-accounts", style: "display:none" });
+  const toggleAccounts = h("button", { text: "View uploaded keys" });
+  const addButton = h("button", { class: "primary", text: "+ Add account" });
+  const addForm = h("div", { class: "openrouter-add-form", style: "display:none" });
+  const nameField = h("input", {
+    type: "text",
+    placeholder: "Account name",
+    maxlength: "80",
+    autocomplete: "off",
+    style: "flex:1 1 160px;min-width:0",
+  }) as HTMLInputElement;
+  const keyField = h("input", {
     type: "password",
-    placeholder: hasKey ? "••••••••••••  (stored)" : "sk-or-v1-...",
-    style: "flex:1 1 auto;min-width:0",
+    placeholder: "sk-or-v1-...",
     autocomplete: "off",
     spellcheck: "false",
+    style: "flex:2 1 240px;min-width:0",
   }) as HTMLInputElement;
+  const saveAccount = h("button", { text: "Save account" });
+  addForm.append(
+    h("div", { class: "row" },
+      h("label", { text: "Account name" }),
+      nameField,
+      keyField,
+      saveAccount,
+    ),
+  );
 
-  const saveBtn = h("button", { class: "primary", text: "Save key" });
-  const clearBtn = h("button", { class: "danger", text: "Remove" });
-  const feedback = h("div", {});
-
-  async function refresh() {
-    const present = (await Bridge.secretPresent("openrouter-api-key")) ?? false;
-    dot.style.background = present ? "#22c55e" : "#f4505e";
-    state.textContent = present
-      ? "Key saved in the Windows Credential Manager."
+  function updateState() {
+    dot.style.background = accounts.length ? "#22c55e" : "#f4505e";
+    state.textContent = accounts.length
+      ? `${accounts.length} OpenRouter account${accounts.length === 1 ? "" : "s"} stored in the OS credential manager.`
       : "No key yet — the chat needs one.";
-    field.placeholder = present ? "••••••••••••  (stored)" : "sk-or-v1-...";
-    clearBtn.style.display = present ? "" : "none";
+    toggleAccounts.textContent = accountsPanel.style.display === "none"
+      ? "View uploaded keys"
+      : "Hide uploaded keys";
   }
 
-  saveBtn.addEventListener("click", async () => {
-    const value = field.value.trim();
-    if (!value) return;
+  function renderAccounts() {
+    clear(accountsPanel);
+    for (const account of accounts) {
+      const keyField = h("input", {
+        type: "password",
+        placeholder: "••••••••••••",
+        readonly: true,
+        autocomplete: "off",
+        style: "flex:1 1 auto;min-width:0",
+        "aria-label": `${account.name} API key`,
+      }) as HTMLInputElement;
+      const revealButton = h("button", { text: "👁", title: "Reveal API key", "aria-label": `Reveal ${account.name} API key` });
+      let revealed = false;
+      revealButton.addEventListener("click", async () => {
+        clear(feedback);
+        if (revealed) {
+          keyField.value = "";
+          keyField.type = "password";
+          revealButton.title = "Reveal API key";
+          revealed = false;
+          return;
+        }
+        revealButton.disabled = true;
+        try {
+          keyField.value = await Bridge.openRouterAccountReveal(account.id);
+          keyField.type = "text";
+          revealButton.title = "Hide API key";
+          revealed = true;
+        } catch (err) {
+          feedback.append(h("div", { class: "notice err", text: `Could not reveal key: ${String(err)}` }));
+        } finally {
+          revealButton.disabled = false;
+        }
+      });
+      const removeButton = h("button", { class: "danger", text: "Remove" });
+      removeButton.addEventListener("click", async () => {
+        if (!confirm(`Remove the OpenRouter key for "${account.name}"?`)) return;
+        removeButton.disabled = true;
+        clear(feedback);
+        try {
+          await Bridge.openRouterAccountRemove(account.id);
+          accounts = accounts.filter((item) => item.id !== account.id);
+          renderAccounts();
+          updateState();
+          feedback.append(h("div", { class: "notice ok", text: "Account removed." }));
+        } catch (err) {
+          removeButton.disabled = false;
+          feedback.append(h("div", { class: "notice err", text: `Could not remove account: ${String(err)}` }));
+        }
+      });
+      accountsPanel.append(
+        h("div", { class: "openrouter-account" },
+          h("div", { class: "openrouter-account-name", text: account.name }),
+          h("div", { class: "row openrouter-account-key" }, keyField, revealButton, removeButton),
+        ),
+      );
+    }
+  }
+
+  toggleAccounts.addEventListener("click", async () => {
     clear(feedback);
+    if (accountsPanel.style.display !== "none") {
+      accountsPanel.style.display = "none";
+      updateState();
+      return;
+    }
     try {
-      await Bridge.secretSet("openrouter-api-key", value);
-      field.value = "";
-      feedback.append(h("div", { class: "notice ok", text: "Saved. It never touches disk." }));
-      await refresh();
+      accounts = await Bridge.openRouterAccounts();
+      renderAccounts();
+      accountsPanel.style.display = "";
+      updateState();
     } catch (err) {
-      feedback.append(h("div", { class: "notice err", text: `Could not save: ${String(err)}` }));
+      feedback.append(h("div", { class: "notice err", text: `Could not load accounts: ${String(err)}` }));
     }
   });
 
-  clearBtn.addEventListener("click", async () => {
+  addButton.addEventListener("click", () => {
+    addForm.style.display = addForm.style.display === "none" ? "" : "none";
+    if (addForm.style.display !== "none") nameField.focus();
+  });
+
+  saveAccount.addEventListener("click", async () => {
     clear(feedback);
+    if (!nameField.value.trim() || !keyField.value.trim()) {
+      feedback.append(h("div", { class: "notice warn", text: "Enter both an account name and an API key." }));
+      return;
+    }
+    saveAccount.disabled = true;
     try {
-      await Bridge.secretClear("openrouter-api-key");
-      feedback.append(h("div", { class: "notice ok", text: "Key removed." }));
-      await refresh();
+      await Bridge.openRouterAccountAdd(nameField.value, keyField.value);
+      nameField.value = "";
+      keyField.value = "";
+      addForm.style.display = "none";
+      accounts = await Bridge.openRouterAccounts();
+      renderAccounts();
+      if (accountsPanel.style.display !== "none") accountsPanel.style.display = "";
+      updateState();
+      feedback.append(h("div", { class: "notice ok", text: "Account saved securely in the OS credential manager." }));
     } catch (err) {
-      feedback.append(h("div", { class: "notice err", text: `Could not remove: ${String(err)}` }));
+      feedback.append(h("div", { class: "notice err", text: `Could not save account: ${String(err)}` }));
+    } finally {
+      saveAccount.disabled = false;
     }
   });
 
@@ -240,14 +337,20 @@ function apiSection(hasKey: boolean): HTMLElement {
     void save();
   });
 
-  clearBtn.style.display = hasKey ? "" : "none";
+  renderAccounts();
+  updateState();
+  if (accountLoadError) {
+    feedback.append(h("div", { class: "notice err", text: `Could not load accounts: ${accountLoadError}` }));
+  }
 
   return h(
     "section",
     {},
     h("h2", {}, dot, h("span", { text: "OpenRouter" })),
     state,
-    h("div", { class: "row" }, h("label", { text: "OpenRouter API key" }), field, saveBtn, clearBtn),
+    h("div", { class: "row" }, addButton, toggleAccounts),
+    addForm,
+    accountsPanel,
     h("div", { class: "row" }, h("label", { text: "Model" }), model),
     h("p", { class: "hint", text: "Images and PDFs require a vision-capable model. The free default may not support them." }),
     feedback,
@@ -429,7 +532,13 @@ async function main() {
     installed: false, settingsPath: "", hookPath: "", hookReady: false,
   };
 
-  const hasKey = (await Bridge.secretPresent("openrouter-api-key")) ?? false;
+  let openRouterAccounts: OpenRouterAccount[] = [];
+  let openRouterError: string | undefined;
+  try {
+    openRouterAccounts = await Bridge.openRouterAccounts();
+  } catch (err) {
+    openRouterError = String(err);
+  }
 
   const keys = [
     "stripe-api-key", "github-token", "vercel-token",
@@ -442,7 +551,7 @@ async function main() {
   root.append(
     h("h1", {}, h("span", { text: "Coucou" }), h("span", { class: "version", text: version })),
     claudeSection(status),
-    apiSection(hasKey),
+    apiSection(openRouterAccounts, openRouterError),
     integrationsSection(present),
     generalSection(),
     h("div", {

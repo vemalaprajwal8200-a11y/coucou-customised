@@ -20,7 +20,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
 
-use claude::{Chat, ChatContext, ChatReply};
+use claude::{Chat, ChatContext, ChatHistoryMessage, ChatReply, SharedConversationContext};
 use files::DroppedFile;
 use hooks::{HookPreview, HookStatus};
 use island::{PollGate, ScreenInfo};
@@ -254,16 +254,24 @@ fn approval_decline(app: AppHandle, request_id: String) {
 async fn chat_send(
     shared: State<'_, Shared>,
     chat: State<'_, Chat>,
+    conversation_id: String,
+    history: Vec<ChatHistoryMessage>,
     query: String,
     context: Option<ChatContext>,
+    shared_context: Vec<SharedConversationContext>,
 ) -> Result<ChatReply, String> {
     let model = shared.settings.lock().unwrap().model.clone();
-    claude::send(&chat, &model, query, context).await
+    claude::send(&chat, conversation_id, history, &model, query, context, shared_context).await
 }
 
 #[tauri::command]
 fn chat_reset(chat: State<Chat>) {
     chat.reset();
+}
+
+#[tauri::command]
+fn chat_delete(chat: State<Chat>, conversation_id: String) {
+    chat.delete(&conversation_id);
 }
 
 /// Copies a dropped file into the inbox and reports its name back.
@@ -286,6 +294,26 @@ fn secret_set(key: String, value: String) -> Result<(), String> {
 #[tauri::command]
 fn secret_clear(key: String) -> Result<(), String> {
     secrets::clear(&key)
+}
+
+#[tauri::command]
+fn openrouter_accounts() -> Result<Vec<secrets::OpenRouterAccount>, String> {
+    secrets::openrouter_accounts()
+}
+
+#[tauri::command]
+fn openrouter_account_add(name: String, key: String) -> Result<secrets::OpenRouterAccount, String> {
+    secrets::add_openrouter_account(&name, &key)
+}
+
+#[tauri::command]
+fn openrouter_account_remove(id: String) -> Result<(), String> {
+    secrets::remove_openrouter_account(&id)
+}
+
+#[tauri::command]
+fn openrouter_account_reveal(id: String) -> Result<String, String> {
+    secrets::reveal_openrouter_key(&id)
 }
 
 /// Opens the configured n8n instance — the URL lives in the Credential Manager.
@@ -410,10 +438,15 @@ pub fn run() {
             log_line,
             chat_send,
             chat_reset,
+            chat_delete,
             ingest_file,
             secret_present,
             secret_set,
             secret_clear,
+            openrouter_accounts,
+            openrouter_account_add,
+            openrouter_account_remove,
+            openrouter_account_reveal,
             refresh_integration,
             open_n8n,
             open_settings_window,
@@ -425,6 +458,9 @@ pub fn run() {
             tray::build(&handle)?;
             // Before the island: see create_settings_window.
             create_settings_window(&handle);
+            // Remove WebView2's child drop target once both webviews exist so
+            // shell file drags can reach wry's target from their first hover.
+            platform::unblock_webview_drops(&handle);
 
             if let Some(win) = island::window(&handle) {
                 platform::make_non_activating(&win);

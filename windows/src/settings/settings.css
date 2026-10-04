@@ -265,3 +265,39 @@ select option {
   background: rgba(245, 165, 36, 0.13);
   color: #fbc06a;
 }
+
+.openrouter-add-form,
+.openrouter-accounts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.openrouter-account {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.openrouter-account-name {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.openrouter-account-key {
+  flex-wrap: nowrap;
+}
+
+.openrouter-account-key input {
+  font-family: var(--mono);
+}
+
+@media (max-width: 580px) {
+  .openrouter-account-key {
+    flex-wrap: wrap;
+  }
+}

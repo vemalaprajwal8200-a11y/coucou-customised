@@ -6,7 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { Settings } from "./state";
+import type { ChatMessage, Settings, SharedConversationContext } from "./state";
 
 export const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -29,6 +29,11 @@ export interface BootInfo {
   hookPath: string;
   /** False where the OS has no global cursor (Wayland): see Island.followPageCursor. */
   cursorPoll: boolean;
+}
+
+export interface OpenRouterAccount {
+  id: string;
+  name: string;
 }
 
 export const Bridge = {
@@ -83,8 +88,21 @@ export const Bridge = {
 
   // ── Chat, files, secrets ──────────────────────────────────────────────────
   /** One chat turn. The API key and any file bytes never leave Rust. */
-  chatSend: (query: string, context: ChatContext | null) =>
-    callOrThrow<{ text: string }>("chat_send", { query, context }),
+  chatSend: (
+    conversationId: string,
+    history: ChatMessage[],
+    query: string,
+    context: ChatContext | null,
+    sharedContext: SharedConversationContext[],
+  ) => callOrThrow<{ text: string }>("chat_send", {
+    conversationId,
+    history,
+    query,
+    context,
+    sharedContext,
+  }),
+  chatDelete: (conversationId: string) =>
+    callOrThrow<void>("chat_delete", { conversationId }),
   chatReset: () => call<void>("chat_reset"),
   /** Copies a dropped file into the inbox. */
   ingestFile: (path: string) => callOrThrow<DroppedFile>("ingest_file", { path }),
@@ -98,6 +116,13 @@ export const Bridge = {
   secretPresent: (key: string) => call<boolean>("secret_present", { key }),
   secretSet: (key: string, value: string) => callOrThrow<void>("secret_set", { key, value }),
   secretClear: (key: string) => callOrThrow<void>("secret_clear", { key }),
+  openRouterAccounts: () => callOrThrow<OpenRouterAccount[]>("openrouter_accounts"),
+  openRouterAccountAdd: (name: string, key: string) =>
+    callOrThrow<OpenRouterAccount>("openrouter_account_add", { name, key }),
+  openRouterAccountRemove: (id: string) =>
+    callOrThrow<void>("openrouter_account_remove", { id }),
+  openRouterAccountReveal: (id: string) =>
+    callOrThrow<string>("openrouter_account_reveal", { id }),
 
   // ── Integrations ──────────────────────────────────────────────────────────
   refreshIntegration: (id: string) => call<void>("refresh_integration", { id }),

@@ -70,13 +70,22 @@ It works from any terminal — Windows Terminal, PowerShell, VS Code, Git Bash.
 
 ## Chat and keys
 
-**Settings… → OpenRouter** takes your OpenRouter API key. Keys live in the **Windows
-Credential Manager**, never on disk and never in the interface — the island can
-only ask whether a key exists. Chat defaults to
+**Settings… → OpenRouter** lets you add multiple named OpenRouter accounts. API
+keys stay in the **Windows Credential Manager**; only account names are saved in
+the app's configuration. Uploaded keys are masked in Settings and are returned
+to the interface only after you explicitly click the reveal button. Chat
+automatically tries the next configured account when OpenRouter reports a
+credit or rate limit, including the free-model daily request limit. Chat defaults to
 `nvidia/nemotron-3-super-120b-a12b:free`. Select a vision-capable model in
 Settings to ask about images or PDFs; those model requests may be billed by
 OpenRouter. Coucou sends plain-text files, images, and PDFs, and reports when a
 file cannot be read or is not supported.
+
+The chat view includes **Past conversations** and **New conversation**. Chat
+transcripts are saved locally in the app's WebView storage; attached files stay
+in Coucou's local inbox. New conversations can also use the text and attachment
+contents from previous chats as context when the original attachment is still
+available in Coucou's inbox; visible conversation transcripts remain separate.
 
 No telemetry. The only network requests Coucou makes are to the services you
 configure yourself.

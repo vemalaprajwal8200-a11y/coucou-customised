@@ -34,6 +34,69 @@ export interface ChatMessage {
   content: string;
 }
 
+export interface ChatConversation {
+  id: string;
+  title: string;
+  updatedAt: number;
+  messages: ChatMessage[];
+  file: { name: string; path: string } | null;
+}
+
+export interface SharedConversationContext {
+  title: string;
+  messages: ChatMessage[];
+  file: { name: string; path: string } | null;
+}
+
+interface StoredConversations {
+  activeId: string | null;
+  conversations: ChatConversation[];
+}
+
+const CONVERSATION_STORAGE_KEY = "coucou.conversations.v1";
+
+function readConversations(): StoredConversations {
+  if (typeof window === "undefined") return { activeId: null, conversations: [] };
+  try {
+    const raw = window.localStorage.getItem(CONVERSATION_STORAGE_KEY);
+    if (!raw) return { activeId: null, conversations: [] };
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      typeof parsed !== "object" || parsed === null ||
+      !("conversations" in parsed) || !Array.isArray(parsed.conversations)
+    ) {
+      throw new Error("Conversation history has an invalid format.");
+    }
+    const conversations = parsed.conversations.filter((item): item is ChatConversation =>
+      typeof item === "object" && item !== null &&
+      "id" in item && typeof item.id === "string" &&
+      "title" in item && typeof item.title === "string" &&
+      "updatedAt" in item && typeof item.updatedAt === "number" &&
+      "messages" in item && Array.isArray(item.messages) &&
+      item.messages.every((message: unknown) =>
+        typeof message === "object" && message !== null &&
+        "id" in message && typeof message.id === "number" &&
+        "role" in message && (message.role === "user" || message.role === "assistant") &&
+        "content" in message && typeof message.content === "string",
+      ) &&
+      "file" in item &&
+      (item.file === null ||
+        (typeof item.file === "object" && item.file !== null &&
+          "name" in item.file && typeof item.file.name === "string" &&
+          "path" in item.file && typeof item.file.path === "string")),
+    );
+    const activeId =
+      "activeId" in parsed && typeof parsed.activeId === "string" &&
+      conversations.some((conversation) => conversation.id === parsed.activeId)
+        ? parsed.activeId
+        : null;
+    return { activeId, conversations };
+  } catch (error) {
+    console.error("[coucou] could not restore conversation history", error);
+    return { activeId: null, conversations: [] };
+  }
+}
+
 export type PromptContext =
   | { kind: "window"; appName: string; title: string; url?: string }
   | { kind: "file"; name: string; path?: string };
@@ -113,6 +176,18 @@ export const DEFAULT_SETTINGS: Settings = {
 type Listener = () => void;
 
 class AppState {
+  constructor() {
+    const stored = readConversations();
+    this.conversations = stored.conversations.sort((a, b) => b.updatedAt - a.updatedAt);
+    this.activeConversationId = stored.activeId;
+    const active = this.activeConversation;
+    this.chatHistory = active?.messages.map((message) => ({ ...message })) ?? [];
+    this.droppedFile = active?.file ? { ...active.file } : null;
+    this.promptContext = active?.file
+      ? { kind: "file", name: active.file.name, path: active.file.path }
+      : null;
+  }
+
   mode: IslandMode = "hidden";
   view: IslandViewName = "overview";
 
@@ -138,6 +213,8 @@ class AppState {
   noteMessage: string | null = null;
   searchResult: SearchResult | null = null;
   chatHistory: ChatMessage[] = [];
+  conversations: ChatConversation[] = [];
+  activeConversationId: string | null = null;
   pendingApproval: ApprovalInfo | null = null;
 
   integrations: Record<string, IntegrationInfo> = {};
@@ -147,6 +224,108 @@ class AppState {
   settings: Settings = { ...DEFAULT_SETTINGS };
 
   private listeners = new Set<Listener>();
+
+  get activeConversation(): ChatConversation | null {
+    return this.conversations.find((conversation) => conversation.id === this.activeConversationId) ?? null;
+  }
+
+  startConversation(file: { name: string; path: string } | null = null): string {
+    const id = typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const conversation: ChatConversation = {
+      id,
+      title: file?.name ?? "New conversation",
+      updatedAt: Date.now(),
+      messages: [],
+      file: file ? { ...file } : null,
+    };
+    this.conversations.unshift(conversation);
+    this.activeConversationId = id;
+    this.chatHistory = [];
+    this.droppedFile = file ? { ...file } : null;
+    this.promptContext = file ? { kind: "file", name: file.name, path: file.path } : null;
+    this.persistConversations();
+    this.notify();
+    return id;
+  }
+
+  selectConversation(id: string): boolean {
+    const conversation = this.conversations.find((item) => item.id === id);
+    if (!conversation) return false;
+    this.activeConversationId = id;
+    this.chatHistory = conversation.messages.map((message) => ({ ...message }));
+    this.droppedFile = conversation.file ? { ...conversation.file } : null;
+    this.promptContext = conversation.file
+      ? { kind: "file", name: conversation.file.name, path: conversation.file.path }
+      : null;
+    this.persistConversations();
+    this.notify();
+    return true;
+  }
+
+  deleteConversation(id: string): boolean {
+    const index = this.conversations.findIndex((conversation) => conversation.id === id);
+    if (index < 0) return false;
+    this.conversations.splice(index, 1);
+    if (this.activeConversationId === id) {
+      const next = this.conversations[0] ?? null;
+      this.activeConversationId = next?.id ?? null;
+      this.chatHistory = next?.messages.map((message) => ({ ...message })) ?? [];
+      this.droppedFile = next?.file ? { ...next.file } : null;
+      this.promptContext = next?.file
+        ? { kind: "file", name: next.file.name, path: next.file.path }
+        : null;
+    }
+    this.persistConversations();
+    this.notify();
+    return true;
+  }
+
+  saveActiveConversation(): void {
+    const conversation = this.activeConversation;
+    if (!conversation) return;
+    conversation.messages = this.chatHistory.map((message) => ({ ...message }));
+    conversation.updatedAt = Date.now();
+    const firstUserMessage = conversation.messages.find((message) => message.role === "user");
+    if (firstUserMessage) {
+      conversation.title = firstUserMessage.content.trim().replace(/\s+/g, " ").slice(0, 48) || "New conversation";
+    }
+    this.conversations.sort((a, b) => b.updatedAt - a.updatedAt);
+    this.persistConversations();
+  }
+
+  updateActiveFile(file: { name: string; path: string }): void {
+    const conversation = this.activeConversation;
+    if (!conversation) return;
+    conversation.file = { ...file };
+    this.droppedFile = { ...file };
+    this.promptContext = { kind: "file", name: file.name, path: file.path };
+    this.persistConversations();
+    this.notify();
+  }
+
+  sharedConversationContext(excludingId: string): SharedConversationContext[] {
+    return this.conversations
+      .filter((conversation) => conversation.id !== excludingId)
+      .map((conversation) => ({
+        title: conversation.title,
+        messages: conversation.messages.map((message) => ({ ...message })),
+        file: conversation.file ? { ...conversation.file } : null,
+      }));
+  }
+
+  private persistConversations(): void {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(
+        CONVERSATION_STORAGE_KEY,
+        JSON.stringify({ activeId: this.activeConversationId, conversations: this.conversations }),
+      );
+    } catch (error) {
+      console.error("[coucou] could not save conversation history", error);
+    }
+  }
 
   subscribe(fn: Listener): () => void {
     this.listeners.add(fn);

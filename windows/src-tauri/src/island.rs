@@ -511,6 +511,17 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                     Ok(s) => (s.width as f64 / scale, s.height as f64 / scale),
                     Err(_) => (PANEL_W, PANEL_H),
                 };
+
+                // Notice the drag's initial press even when the cursor has not
+                // moved yet; otherwise the WebView2 drop target can win the OLE
+                // hit test before wry's parent target is restored.
+                let down = left_button_down();
+                if down && !was_down {
+                    let handle = app.clone();
+                    let _ = app.run_on_main_thread(move || platform::unblock_webview_drops(&handle));
+                }
+                was_down = down;
+
                 if (x - last.0).abs() < 1.0 && (y - last.1).abs() < 1.0 {
                     continue;
                 }
@@ -535,13 +546,6 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                 // the mouse, which also makes the drop zone as forgiving as the Mac's.
                 // A press may be the start of a drag: make sure the drop target is
                 // ours before the file arrives.
-                let down = left_button_down();
-                if down && !was_down {
-                    let handle = app.clone();
-                    let _ = app.run_on_main_thread(move || platform::unblock_webview_drops(&handle));
-                }
-                was_down = down;
-
                 let dragging = down
                     && x >= 0.0
                     && x <= size.0

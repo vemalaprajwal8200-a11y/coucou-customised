@@ -760,6 +760,133 @@ input[type="range"]::-webkit-slider-thumb {
   padding: 12px 16px 14px 84px;
 }
 
+.chat-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.chat-action {
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ink-2);
+  font: 500 11px var(--font);
+  cursor: default;
+}
+
+.chat-action:hover,
+.chat-action.selected {
+  background: rgba(255, 255, 255, 0.13);
+}
+
+.chat-action.primary {
+  color: #0b0c0e;
+  background: var(--ink);
+  border-color: transparent;
+}
+
+.chat-action:disabled {
+  opacity: 0.55;
+}
+
+.conversation-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+.conversation-list[hidden],
+.chat-log[hidden] {
+  display: none;
+}
+
+.conversation-row {
+  display: flex;
+  align-items: stretch;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+
+.conversation-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--ink-2);
+  text-align: left;
+  cursor: default;
+}
+
+.conversation-delete {
+  align-self: center;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 7px;
+  padding: 6px 7px;
+  background: transparent;
+  color: var(--dim-2);
+  font: 500 10px var(--font);
+  cursor: default;
+}
+
+.conversation-delete:hover {
+  background: rgba(244, 80, 94, 0.14);
+  color: #ff858e;
+}
+
+.conversation-delete:disabled,
+.conversation-item:disabled {
+  opacity: 0.55;
+}
+
+.conversation-item:hover,
+.conversation-item.active {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.conversation-item.active {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.conversation-title {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--ink);
+  font: 500 11.5px var(--font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-preview,
+.conversation-date,
+.conversation-empty {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--dim-2);
+  font: 400 10.5px var(--font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-empty {
+  padding: 12px 4px;
+}
+
 .chip-row:empty {
   display: none;
 }

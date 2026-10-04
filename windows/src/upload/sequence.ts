@@ -276,6 +276,8 @@ class UploadSequence {
   exitZone() {}
 
   performDrop(uploadDuration: number) {
+    // File-picker selections do not pass through the drag-enter event.
+    if (!this.isActive) this.enterZone(USC.REST_X, USC.REST_Y - 14);
     this.uploadDuration = uploadDuration;
     this.dropWall = this.now();
     // Restart the canonical post-drop timeline however long the user hovered.

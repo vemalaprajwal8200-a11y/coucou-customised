@@ -404,10 +404,7 @@ export class Island {
    */
   private swallow(path: string) {
     const name = path.split(/[\\/]/).pop() || "file";
-    State.droppedFile = { name, path };
-    State.promptContext = { kind: "file", name, path };
-    State.chatHistory = [];
-    void Bridge.chatReset();
+    State.startConversation({ name, path });
 
     UploadSeq.performDrop(State.uploadDuration);
     this.uploadTens = 0;
@@ -424,9 +421,7 @@ export class Island {
 
     void Bridge.ingestFile(path)
       .then((file) => {
-        State.droppedFile = { name: file.name, path: file.path };
-        State.promptContext = { kind: "file", name: file.name, path: file.path };
-        State.notify();
+        State.updateActiveFile({ name: file.name, path: file.path });
       })
       .catch((err) => {
         UploadSeq.deactivate();
