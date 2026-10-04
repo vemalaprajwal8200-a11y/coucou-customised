@@ -226,3 +226,5 @@ Inspired by the notch-companion concepts shared by design studios — this proje
 [Website](https://louis-cfm.github.io/coucou/) · [Privacy](https://louis-cfm.github.io/coucou/privacy.html) · [Terms](https://louis-cfm.github.io/coucou/terms.html) · [Support](https://louis-cfm.github.io/coucou/support.html)
 
 </div>
+#   c o u c o u - c u s t o m i s e d  
+ 
