@@ -272,6 +272,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
   let suppressWakeRestart = false;
   let wakeAckInProgress = false;
   let wakeFeedbackTimer: number | null = null;
+  let wakeConversationCompleted = false;
   let actionConfirmationActive = false;
   let actionConfirmationProcessing = false;
   let actionConfirmationStage: "choose" | "confirm" = "confirm";
@@ -367,6 +368,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
   }
 
   function holdWakeConversation() {
+    wakeConversationCompleted = false;
     wakeConversationHeld = true;
     window.dispatchEvent(new Event("coucou-wake-word"));
   }
@@ -374,12 +376,22 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
   function releaseWakeConversation() {
     if (!wakeConversationHeld) return;
     wakeConversationHeld = false;
+    wakeConversationCompleted = true;
     window.dispatchEvent(new Event("coucou-wake-word-complete"));
+    void Bridge.setVoiceActive(false).catch((error: unknown) => {
+      console.error("[coucou] could not clear the wake voice hold", error);
+    });
+    window.setTimeout(() => {
+      wakeConversationCompleted = false;
+      if (!sending && voiceState === "idle" && !wakeConversationHeld) {
+        void reconcileWakeWord();
+      }
+    }, 1_000);
   }
 
   async function reconcileWakeWord() {
     if (!wakeWordReady || !State.settings.wakeWordEnabled || !IS_TAURI || sending || wakeCalibrationActive
-      || !!pendingAction || actionConfirmationActive
+      || wakeConversationCompleted || !!pendingAction || actionConfirmationActive
       || voiceState === "listening" || voiceState === "transcribing"
       || voiceState === "speaking" || TTS.isSpeaking()) {
       if (wakeWord.isActive()) wakeWord.stop();
@@ -392,15 +404,11 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       await wakeWord.start(
         () => {
           if (wakeFeedbackTimer !== null) window.clearTimeout(wakeFeedbackTimer);
-          holdWakeConversation();
           setVoiceState("wake", 'Listening for "Hey Macha"…');
           Sound.play("blip");
           wakeFeedbackTimer = window.setTimeout(() => {
             wakeFeedbackTimer = null;
-            if (voiceState === "wake") {
-              releaseWakeConversation();
-              setVoiceState("idle");
-            }
+            if (voiceState === "wake") setVoiceState("idle");
           }, 10_000);
         },
         (text) => void onWakeUtterance(text),
@@ -428,7 +436,10 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
 
   async function onWakeUtterance(transcript: string) {
     const command = extractWakeCommand(transcript, State.settings.wakeWordPronunciation);
-    if (command === null) return;
+    if (command === null) {
+      releaseWakeConversation();
+      return;
+    }
 
     if (wakeFeedbackTimer !== null) {
       window.clearTimeout(wakeFeedbackTimer);
@@ -450,7 +461,6 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       return;
     }
 
-    suppressWakeRestart = false;
     try {
       await Bridge.setVoiceActive(true);
       input.value = command;
@@ -952,11 +962,12 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       State.notify();
       onHeightChange();
       input.focus();
-      if (voiceState === "idle") void reconcileWakeWord();
       if (isOpenAction(pendingAction)) {
         void beginActionConfirmation();
       } else if (wakeInitiated) {
         releaseWakeConversation();
+      } else if (voiceState === "idle") {
+        void reconcileWakeWord();
       }
     }
   }
