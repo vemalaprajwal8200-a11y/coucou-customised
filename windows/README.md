@@ -68,18 +68,33 @@ in time, Coucou stays quiet and Claude Code asks in the terminal as usual.
 
 It works from any terminal — Windows Terminal, PowerShell, VS Code, Git Bash.
 
-## Chat and keys
+## LLM providers
 
-**Settings… → OpenRouter** lets you add multiple named OpenRouter accounts. API
-keys stay in the **Windows Credential Manager**; only account names are saved in
-the app's configuration. Uploaded keys are masked in Settings and are returned
-to the interface only after you explicitly click the reveal button. Chat
-automatically tries the next configured account when OpenRouter reports a
-credit or rate limit, including the free-model daily request limit. Chat defaults to
-`nvidia/nemotron-3-super-120b-a12b:free`. Select a vision-capable model in
-Settings to ask about images or PDFs; those model requests may be billed by
-OpenRouter. Coucou sends plain-text files, images, and PDFs, and reports when a
-file cannot be read or is not supported.
+**Settings… → LLM providers** defaults to **Auto**: Coucou tries the local
+Ollama server first and contacts OpenRouter only if Ollama is unavailable, the
+selected model is missing, or the local request fails with a server error or
+timeout. It checks Ollama again automatically so it can return to local
+inference. Choose **Ollama only** to prevent any OpenRouter calls, or
+**OpenRouter only** to bypass Ollama.
+
+The Ollama model picker includes `qwen2.5:7b`, `gpt-oss:20b`, and any other
+installed models discovered from Ollama. The default is `qwen2.5:7b`; if a
+model is missing, Settings shows the matching `ollama pull <model>` command.
+Ollama must be running locally; Coucou tries `ollama serve` once if it is not
+reachable.
+
+OpenRouter accounts are configured as the fallback in **Settings… → LLM
+providers**. API keys stay in the **Windows Credential Manager**; only account
+names are saved in the app's configuration. Uploaded keys are masked in
+Settings and returned to the interface only after you explicitly click the
+reveal button. OpenRouter requests default to 1024 output tokens and have a
+single lower-token retry for credit errors.
+
+The default **Automatic** model uses OpenRouter's free-model router to choose a
+model for each fallback task. Settings also lists the models in the supplied
+model guide for manual selection. OpenRouter's lineup and limits can change.
+Coucou sends plain-text files, images, and PDFs, and reports when a file cannot
+be read or is not supported.
 
 The chat view includes **Past conversations** and **New conversation**. Chat
 transcripts are saved locally in the app's WebView storage; attached files stay
@@ -87,8 +102,77 @@ in Coucou's local inbox. New conversations can also use the text and attachment
 contents from previous chats as context when the original attachment is still
 available in Coucou's inbox; visible conversation transcripts remain separate.
 
+### Local automation
+
+In **Settings… → Local automation**, choose the folders Mochi may work in.
+Mochi can open installed apps from Windows app registrations or Start menu
+shortcuts and, within selected folders, list and read files, open files or
+folders, create items, and move files. It can also replace or clear a file's
+contents after showing the proposed change and creating a backup. **Every action
+requires your approval**; it cannot delete files or run shell commands, and it
+cannot access paths outside the folders you selected. Removing a folder revokes
+that access.
+
+When Mochi reads a file, its contents and the authorized folder paths are sent
+to the selected chat provider (local Ollama or OpenRouter). Only authorize
+folders and request file reads you are comfortable sharing with that provider.
+Models that do not support tool calls may answer normally without performing
+local actions.
+
 No telemetry. The only network requests Coucou makes are to the services you
 configure yourself.
+
+## Voice control
+
+Voice input runs offline with the local `faster-whisper` model `base.en`;
+transcription is forced to English and sent only to the local service at `127.0.0.1:5005`, and voice
+chat uses Ollama-only mode so transcripts are not sent to OpenRouter. Coucou can
+also speak replies locally using Web Speech when an installed voice is available,
+with Windows SAPI as the automatic fallback. Both engines select English voices
+only, preferring en-US and then en-IN; install an English Windows speech voice if
+none is available. Configure **Settings… → General → Speak replies** to keep it
+off, enable it only for voice messages (the default), or speak every reply. The
+voice, engine, rate, and volume are configurable there; speech text is processed
+on-device.
+
+The **Wake phrase "Hey Macha"** setting is enabled by default. While enabled,
+Coucou listens locally for speech and sends completed speech segments only to
+the local Whisper service. Say **“Hey Macha, [your question]”** in one go, or say
+“Hey Macha” and ask within ten seconds. For better recognition on your
+microphone, choose **Settings… → General → Record “Hey Macha”** and repeat the
+phrase during the five-second recording. Coucou uses the local Whisper result as
+a recognition hint and tunes the microphone speech threshold; the recording is
+discarded after calibration. The microphone indicator pulses blue while the
+conversation stays open until its spoken reply finishes, then normal auto-hide
+resumes. The microphone indicator pulses blue while the wake listener is armed.
+Disable the setting to stop background microphone
+monitoring. Windows may need microphone access enabled for Coucou under
+**Privacy & security → Microphone**.
+
+Opening an application, file, or folder requires a separate confirmation:
+Coucou asks aloud and waits for an English **“yes”** or **“no”** before acting.
+It looks up the exact full name in Windows' installed Start-app catalog
+(including packaged apps), then falls back to Start Menu shortcuts. If multiple
+matching entries are found, Coucou asks which one you mean before asking for
+final confirmation. The on-screen choice and Yes/No buttons remain available
+as alternatives.
+
+Install Python 3.10 or newer and the dependencies from the repository root:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Coucou starts the transcription service when it launches. If automatic startup
+is unavailable, run `start_stt.bat` from the repository root. Press
+**Ctrl+Alt+Space** or the **Voice** button beside the chat input to start
+recording; press it again to stop and send the recognized text through chat.
+In automatic provider mode, voice requests try the configured OpenRouter model
+first and fall back to Ollama if the network or OpenRouter credits are
+unavailable. Explicit Ollama-only or OpenRouter-only settings are respected.
+The service loads the Whisper model on startup. To use a different model, edit
+`MODEL_NAME` in the root `stt_server.py` (the default is `base.en`).
 
 ## Build it yourself
 

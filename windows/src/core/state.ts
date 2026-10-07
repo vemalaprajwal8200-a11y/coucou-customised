@@ -32,6 +32,8 @@ export interface ChatMessage {
   id: number;
   role: "user" | "assistant";
   content: string;
+  model?: string;
+  fallbackNotice?: string;
 }
 
 export interface ChatConversation {
@@ -154,8 +156,21 @@ export interface Settings {
   autostart: boolean;
   hooksInstalled: boolean;
   autoHide: boolean;
-  /** Claude model used by the chat. */
+  /** OpenRouter model slug; openrouter/free enables per-request auto-routing. */
   model: string;
+  automationFolders: string[];
+  providerMode: "auto" | "ollamaOnly" | "openRouterOnly";
+  ollamaModel: string;
+  speakRepliesMode: "off" | "voiceOnly" | "always";
+  ttsEngine: "auto" | "webSpeech" | "sapi";
+  ttsVoice: string;
+  ttsRate: number;
+  ttsVolume: number;
+  wakeWordEnabled: boolean;
+  wakeWordPronunciation: string;
+  wakeWordThreshold: number;
+  /** Kept to read settings.json files written by earlier Windows builds. */
+  spokenReplies: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -170,7 +185,19 @@ export const DEFAULT_SETTINGS: Settings = {
   autostart: false,
   hooksInstalled: false,
   autoHide: true,
-  model: "nvidia/nemotron-3-super-120b-a12b:free",
+  model: "openrouter/free",
+  automationFolders: [],
+  providerMode: "auto",
+  ollamaModel: "qwen2.5:7b",
+  speakRepliesMode: "voiceOnly",
+  ttsEngine: "auto",
+  ttsVoice: "",
+  ttsRate: 1,
+  ttsVolume: 1,
+  wakeWordEnabled: true,
+  wakeWordPronunciation: "Hey Macha",
+  wakeWordThreshold: 0.012,
+  spokenReplies: false,
 };
 
 type Listener = () => void;

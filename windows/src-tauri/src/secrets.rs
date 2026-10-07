@@ -40,9 +40,7 @@ fn entry(key: &str) -> Option<Entry> {
 }
 
 fn account_entry(id: &str) -> Result<Entry, String> {
-    if id.is_empty()
-        || id.len() > 80
-        || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    if id.is_empty() || id.len() > 80 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
     {
         return Err("Invalid OpenRouter account ID.".into());
     }
@@ -69,14 +67,20 @@ fn load_openrouter_accounts() -> Result<Vec<OpenRouterAccount>, String> {
     if accounts.iter().any(|account| {
         account.id.is_empty()
             || account.id.len() > 80
-            || !account.id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            || !account
+                .id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
             || account.name.trim().is_empty()
             || account.name.chars().count() > 80
     }) {
         return Err("OpenRouter account list contains invalid entries.".into());
     }
     for (index, account) in accounts.iter().enumerate() {
-        if accounts[index + 1..].iter().any(|other| other.id == account.id) {
+        if accounts[index + 1..]
+            .iter()
+            .any(|other| other.id == account.id)
+        {
             return Err("OpenRouter account list contains duplicate IDs.".into());
         }
     }
@@ -127,7 +131,9 @@ pub fn add_openrouter_account(name: &str, key: &str) -> Result<OpenRouterAccount
         id: id.clone(),
         name: name.to_string(),
     };
-    account_entry(&id)?.set_password(key).map_err(|e| e.to_string())?;
+    account_entry(&id)?
+        .set_password(key)
+        .map_err(|e| e.to_string())?;
     accounts.push(account.clone());
     if let Err(error) = save_openrouter_accounts(&accounts) {
         return match account_entry(&id)
@@ -170,7 +176,10 @@ pub fn remove_openrouter_account(id: &str) -> Result<(), String> {
 }
 
 pub fn reveal_openrouter_key(id: &str) -> Result<String, String> {
-    if !load_openrouter_accounts()?.iter().any(|account| account.id == id) {
+    if !load_openrouter_accounts()?
+        .iter()
+        .any(|account| account.id == id)
+    {
         return Err("OpenRouter account was not found.".into());
     }
     if id == "legacy" {

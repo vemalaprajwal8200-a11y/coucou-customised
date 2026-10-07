@@ -20,6 +20,7 @@ async function main() {
   if (boot) {
     State.settings = { ...State.settings, ...boot.settings };
   }
+  window.dispatchEvent(new Event("coucou-settings-ready"));
   island.applySettings();
   State.loadIntegrationTasks();
   if (boot && !boot.cursorPoll) island.followPageCursor();
@@ -55,6 +56,26 @@ async function main() {
   });
 
   await onEvent<null>("screen-changed", () => void Bridge.reposition());
+
+  await onEvent<null>("voice-hotkey", () => {
+    setPaused(false);
+    island.alert("prompt");
+  });
+  window.addEventListener("coucou-wake-word", () => {
+    setPaused(false);
+    State.isPinned = true;
+    island.alert("prompt");
+    void Bridge.setWakeConversationActive(true).catch((error: unknown) => {
+      console.error("[coucou] could not keep the wake conversation visible", error);
+    });
+  });
+  window.addEventListener("coucou-wake-word-complete", () => {
+    State.isPinned = false;
+    island.dropPin();
+    void Bridge.setWakeConversationActive(false).catch((error: unknown) => {
+      console.error("[coucou] could not release the wake conversation visibility hold", error);
+    });
+  });
 
   // The settings window writes preferences; apply them here without a restart.
   await onEvent<Settings>("settings-changed", (s) => {

@@ -348,6 +348,7 @@ export class Island {
   /** An alert stopped waiting for an answer: let the island auto-close again. */
   dropPin() {
     this.fsm.pinned = false;
+    if (!this.wasInIsland) this.fsm.mouseLeft();
   }
 
   // ── File drop ───────────────────────────────────────────────────────────────

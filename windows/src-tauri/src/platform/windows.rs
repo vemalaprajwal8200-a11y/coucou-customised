@@ -7,7 +7,7 @@ use std::process::Command;
 use tauri::{AppHandle, Manager, WebviewWindow};
 
 use ::windows::core::{BOOL, PWSTR};
-use ::windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, HWND, LPARAM, LocalFree, POINT};
+use ::windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL, HWND, LPARAM, POINT};
 use ::windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use ::windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
 use ::windows::Win32::System::Ole::RevokeDragDrop;
@@ -78,8 +78,8 @@ pub fn no_console(cmd: &mut Command) -> &mut Command {
 }
 
 pub fn open_url(url: &str) {
-    let _ = no_console(Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", url]))
-        .spawn();
+    let _ =
+        no_console(Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", url])).spawn();
 }
 
 pub fn reveal_folder(path: &str) {
@@ -189,7 +189,10 @@ fn is_desktop_shell_window(hwnd: HWND) -> bool {
 }
 
 fn is_desktop_shell_class(name: &str) -> bool {
-    matches!(name, "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd")
+    matches!(
+        name,
+        "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+    )
 }
 
 /// True while the left mouse button is held — the only signal we get that a
@@ -221,7 +224,9 @@ fn hwnd_of(win: &WebviewWindow) -> Option<HWND> {
 /// Cheap and idempotent, so it is simply re-run whenever a drag might be starting.
 pub fn unblock_webview_drops(app: &AppHandle) {
     for label in [WINDOW_LABEL, "settings"] {
-        let Some(win) = app.get_webview_window(label) else { continue };
+        let Some(win) = app.get_webview_window(label) else {
+            continue;
+        };
         let Some(hwnd) = hwnd_of(&win) else { continue };
         unsafe {
             let _ = EnumChildWindows(Some(hwnd), Some(revoke_render_widget), LPARAM(0));
@@ -247,7 +252,12 @@ mod tests {
 
     #[test]
     fn desktop_shell_windows_are_not_fullscreen_apps() {
-        for class in ["Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"] {
+        for class in [
+            "Progman",
+            "WorkerW",
+            "Shell_TrayWnd",
+            "Shell_SecondaryTrayWnd",
+        ] {
             assert!(is_desktop_shell_class(class));
         }
         assert!(!is_desktop_shell_class("Chrome_WidgetWin_1"));

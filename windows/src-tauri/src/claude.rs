@@ -1,5 +1,5 @@
 // Claude API client — the same integration as ClaudeService.swift: multi-turn
-// chat with web search, and files sent as document/image/text blocks.
+// chat with web search, and files sent as text, image, or file content parts.
 //
 // API requests and file reads stay on the Rust side; key reveal is a separate,
 // explicit Settings action.
@@ -9,27 +9,36 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::sync::watch;
 
-use crate::secrets;
+use crate::{automation, llm_client};
 
-const ENDPOINT: &str = "https://openrouter.ai/api/v1/messages";
-const ANTHROPIC_VERSION: &str = "2023-06-01";
-const MAX_TOKENS: u32 = 4096;
 /// Text and code files are inlined; anything larger is skipped, as on macOS.
 const MAX_INLINE_TEXT: u64 = 200_000;
+const MAX_AUTOMATION_ACTIONS: u8 = 5;
 
-pub const DEFAULT_MODEL: &str = "nvidia/nemotron-3-super-120b-a12b:free";
+pub const DEFAULT_MODEL: &str = "openrouter/free";
 
 const SYSTEM_PROMPT: &str = "You are Mochi, a personal AI assistant living at the top of the user's screen. \
 You have web search access and can help with absolutely anything — research, coding, finding places, recommendations, tasks, questions. \
+When the user explicitly asks to open an installed app, folder, or file, use the local action tools instead of merely explaining how. \
+For file edits, write_file replaces all existing contents and erase_file_content clears them; state that clearly and wait for the user's approval. \
 Respond in the user's language. Be thorough and complete — use as much detail as the task requires. \
-No markdown formatting (no **, no ##, no bullet dashes). Use plain text with line breaks.";
+Use fenced code blocks for code, commands, configuration, and other copyable snippets; add a language tag when known. \
+Keep surrounding prose plain and readable.";
 
 #[derive(Default)]
 pub struct Chat {
-    /// Full multi-turn history, including tool_use / tool_result blocks.
+    /// Full multi-turn history in OpenRouter Chat Completions message format.
     conversations: Mutex<HashMap<String, Vec<Value>>>,
-    active_openrouter_account: Mutex<Option<String>>,
+    pending_actions: Mutex<HashMap<String, PendingAction>>,
+    action_counts: Mutex<HashMap<String, u8>>,
+    requests: Mutex<HashMap<String, watch::Sender<bool>>>,
+}
+
+struct PendingAction {
+    tool_call_id: Option<String>,
+    action: automation::AutomationAction,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -57,10 +66,18 @@ struct SharedContextFile {
 impl Chat {
     pub fn reset(&self) {
         self.conversations.lock().unwrap().clear();
+        self.pending_actions.lock().unwrap().clear();
+        self.action_counts.lock().unwrap().clear();
+        for request in self.requests.lock().unwrap().values() {
+            let _ = request.send(true);
+        }
+        self.requests.lock().unwrap().clear();
     }
 
     pub fn delete(&self, conversation_id: &str) {
         self.conversations.lock().unwrap().remove(conversation_id);
+        self.pending_actions.lock().unwrap().remove(conversation_id);
+        self.action_counts.lock().unwrap().remove(conversation_id);
     }
 
     fn seed_history(
@@ -74,7 +91,9 @@ impl Chat {
             return Err("Conversation ID is required.".into());
         }
         let mut conversations = self.conversations.lock().unwrap();
-        let messages = conversations.entry(conversation_id.to_string()).or_default();
+        let messages = conversations
+            .entry(conversation_id.to_string())
+            .or_default();
         if messages.is_empty() {
             let mut seeded = Vec::with_capacity(history.len());
             let mut context_added = false;
@@ -95,7 +114,7 @@ impl Chat {
                 } else {
                     seeded.push(json!({
                         "role": role,
-                        "content": [{ "type": "text", "text": message.content }],
+                        "content": message.content,
                     }));
                 }
             }
@@ -135,19 +154,79 @@ impl Chat {
             .cloned()
             .unwrap_or_default()
     }
+
+    fn take_pending_action(&self, conversation_id: &str) -> Option<PendingAction> {
+        self.pending_actions.lock().unwrap().remove(conversation_id)
+    }
+
+    fn action_count(&self, conversation_id: &str) -> u8 {
+        self.action_counts
+            .lock()
+            .unwrap()
+            .get(conversation_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn increment_action_count(&self, conversation_id: &str) {
+        let mut counts = self.action_counts.lock().unwrap();
+        *counts.entry(conversation_id.to_string()).or_default() += 1;
+    }
+
+    fn reset_action_count(&self, conversation_id: &str) {
+        self.action_counts.lock().unwrap().remove(conversation_id);
+    }
+
+    pub fn begin_request(&self, request_id: &str) -> Result<watch::Receiver<bool>, String> {
+        if request_id.is_empty() || request_id.len() > 100 {
+            return Err("Invalid chat request ID.".into());
+        }
+        let (sender, receiver) = watch::channel(false);
+        let mut requests = self.requests.lock().unwrap();
+        if requests.contains_key(request_id) {
+            return Err("A chat request with this ID is already running.".into());
+        }
+        requests.insert(request_id.to_string(), sender);
+        Ok(receiver)
+    }
+
+    pub fn cancel_request(&self, request_id: &str) -> Result<(), String> {
+        let requests = self.requests.lock().unwrap();
+        let sender = requests
+            .get(request_id)
+            .ok_or_else(|| "This chat request is no longer running.".to_string())?;
+        sender
+            .send(true)
+            .map_err(|_| "This chat request is no longer running.".to_string())
+    }
+
+    pub fn finish_request(&self, request_id: &str) {
+        self.requests.lock().unwrap().remove(request_id);
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ChatContext {
-    File { name: String, path: String },
-    Window { app_name: String, title: String, url: Option<String> },
+    File {
+        name: String,
+        path: String,
+    },
+    Window {
+        app_name: String,
+        title: String,
+        url: Option<String>,
+    },
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatReply {
     pub text: String,
+    pub model: String,
+    pub action: Option<automation::AutomationAction>,
+    pub provider: String,
+    pub fallback_notice: Option<String>,
 }
 
 /// One chat turn. Returns the assistant's text, or a message the island shows
@@ -160,13 +239,37 @@ pub async fn send(
     query: String,
     context: Option<ChatContext>,
     shared_context: Vec<SharedConversationContext>,
+    automation_folders: &[String],
+    provider_mode: &str,
+    ollama_model: &str,
+    cancel: &mut watch::Receiver<bool>,
 ) -> Result<ChatReply, String> {
-    let accounts = secrets::openrouter_accounts()?;
-    if accounts.is_empty() {
-        return Err("No OpenRouter API keys are configured. Open Settings.".into());
-    }
+    chat.seed_history(
+        &conversation_id,
+        &history,
+        context.as_ref(),
+        &shared_context,
+    )?;
+    chat.reset_action_count(&conversation_id);
 
-    chat.seed_history(&conversation_id, &history, context.as_ref(), &shared_context)?;
+    if let Some(app_name) = automation::explicit_open_app(&query) {
+        let action = automation::AutomationAction {
+            name: "open_app".into(),
+            arguments: json!({ "appName": app_name }),
+            preview: None,
+            preview_hash: None,
+        };
+        return propose_local_action(chat, &conversation_id, &query, action, automation_folders);
+    }
+    if let Some(path) = automation::explicit_open_path(&query) {
+        let action = automation::AutomationAction {
+            name: "open_path".into(),
+            arguments: json!({ "path": path }),
+            preview: None,
+            preview_hash: None,
+        };
+        return propose_local_action(chat, &conversation_id, &query, action, automation_folders);
+    }
 
     // File / window context rides along with the first message only, exactly
     // like ClaudeService.chat().
@@ -177,89 +280,292 @@ pub async fn send(
     }
     content.push(json!({ "type": "text", "text": query }));
 
-    chat.push(&conversation_id, json!({ "role": "user", "content": content }));
+    chat.push(
+        &conversation_id,
+        json!({ "role": "user", "content": content }),
+    );
 
-    let body = request_body(model, chat.snapshot(&conversation_id));
+    let completion = match llm_client::chat(
+        provider_messages(chat.snapshot(&conversation_id), automation_folders),
+        (!automation_folders.is_empty()).then(automation_tools),
+        provider_mode,
+        ollama_model,
+        model,
+        cancel,
+    )
+    .await
+    {
+        Ok(completion) => completion,
+        Err(error) => {
+            chat.pop(&conversation_id);
+            return Err(error);
+        }
+    };
 
-    let current_id = chat.active_openrouter_account.lock().unwrap().clone();
-    let start = current_id
-        .as_ref()
-        .and_then(|id| accounts.iter().position(|account| &account.id == id))
-        .unwrap_or(0);
-    let mut last_limit_error = None;
-    let mut response = None;
-    for offset in 0..accounts.len() {
-        let index = (start + offset) % accounts.len();
-        let account = &accounts[index];
-        let key = match secrets::openrouter_key_for_account(&account.id) {
-            Ok(key) => key,
-            Err(error) => {
-                chat.pop(&conversation_id);
-                return Err(error);
-            }
-        };
-        match call(&key, &body).await {
-            Ok(value) => {
-                *chat.active_openrouter_account.lock().unwrap() = Some(account.id.clone());
-                response = Some(value);
-                break;
-            }
-            Err(error) if error.account_limit_reached => {
-                last_limit_error = Some(error.message);
-                let next = &accounts[(index + 1) % accounts.len()];
-                *chat.active_openrouter_account.lock().unwrap() = Some(next.id.clone());
-            }
-            Err(error) => {
-                chat.pop(&conversation_id);
-                return Err(error.message);
-            }
+    match handle_response(chat, &conversation_id, automation_folders, completion) {
+        Ok(reply) => Ok(reply),
+        Err(error) => {
+            chat.pop(&conversation_id);
+            Err(error)
         }
     }
-    let Some(response) = response else {
-        chat.pop(&conversation_id);
-        return Err(format!(
-            "All configured OpenRouter accounts have reached a usage or credit limit.{}",
-            last_limit_error
-                .map(|detail| format!(" Last error: {detail}"))
-                .unwrap_or_default()
-        ));
-    };
+}
 
-    // A policy decline comes back as HTTP 200 with stop_reason "refusal".
-    if response.get("stop_reason").and_then(Value::as_str) == Some("refusal") {
-        chat.pop(&conversation_id);
-        let why = response
-            .get("stop_details")
-            .and_then(|d| d.get("explanation"))
-            .and_then(Value::as_str)
-            .unwrap_or("Claude declined this one.");
-        return Err(why.to_string());
+fn propose_local_action(
+    chat: &Chat,
+    conversation_id: &str,
+    query: &str,
+    action: automation::AutomationAction,
+    automation_folders: &[String],
+) -> Result<ChatReply, String> {
+    let action = automation::prepare(action, automation_folders)?;
+    chat.push(conversation_id, json!({ "role": "user", "content": query }));
+    chat.pending_actions.lock().unwrap().insert(
+        conversation_id.to_string(),
+        PendingAction {
+            tool_call_id: None,
+            action: action.clone(),
+        },
+    );
+    Ok(ChatReply {
+        text: String::new(),
+        model: "Local automation".into(),
+        action: Some(action),
+        provider: "local".into(),
+        fallback_notice: None,
+    })
+}
+
+pub async fn resolve_action(
+    chat: &Chat,
+    conversation_id: &str,
+    model: &str,
+    approved: bool,
+    selected_app_id: Option<String>,
+    automation_folders: &[String],
+    provider_mode: &str,
+    ollama_model: &str,
+    cancel: &mut watch::Receiver<bool>,
+) -> Result<ChatReply, String> {
+    if approved {
+        let mut pending_actions = chat.pending_actions.lock().unwrap();
+        let pending = pending_actions
+            .get_mut(conversation_id)
+            .ok_or_else(|| "This local action is no longer pending.".to_string())?;
+        automation::select_app_target(&mut pending.action, selected_app_id.as_deref())?;
     }
+    let pending = chat
+        .take_pending_action(conversation_id)
+        .ok_or_else(|| "This local action is no longer pending.".to_string())?;
+    let Some(tool_call_id) = pending.tool_call_id else {
+        let text = if approved {
+            automation::execute(&pending.action, automation_folders)?
+        } else if pending.action.name == "open_app" {
+            "Okay, I won't open the app. Nothing was changed.".into()
+        } else if pending.action.name == "open_path" {
+            "Okay, I won't open the file or folder. Nothing was changed.".into()
+        } else {
+            "Okay, I won't perform that action. Nothing was changed.".into()
+        };
+        chat.push(
+            conversation_id,
+            json!({ "role": "assistant", "content": text }),
+        );
+        return Ok(ChatReply {
+            text,
+            model: "Local automation".into(),
+            action: None,
+            provider: "local".into(),
+            fallback_notice: None,
+        });
+    };
+    let result = if approved {
+        automation::execute(&pending.action, automation_folders)
+            .unwrap_or_else(|error| format!("Action failed: {error}"))
+    } else {
+        "The user denied this action. Do not repeat it; explain that no change was made.".into()
+    };
+    chat.push(
+        conversation_id,
+        json!({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": result,
+        }),
+    );
+    let completion = llm_client::chat(
+        provider_messages(chat.snapshot(conversation_id), automation_folders),
+        (!automation_folders.is_empty()).then(automation_tools),
+        provider_mode,
+        ollama_model,
+        model,
+        cancel,
+    )
+    .await?;
+    handle_response(chat, conversation_id, automation_folders, completion)
+}
 
-    let Some(blocks) = response.get("content").and_then(Value::as_array).cloned() else {
-        chat.pop(&conversation_id);
+fn provider_messages(mut history: Vec<Value>, automation_folders: &[String]) -> Vec<Value> {
+    const MAX_HISTORY_MESSAGES: usize = 20;
+    if history.len() > MAX_HISTORY_MESSAGES {
+        history.drain(..history.len() - MAX_HISTORY_MESSAGES);
+    }
+    let automation_context = if automation_folders.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nThe user authorized local file actions only inside these folders: {}. \
+Never attempt deletion, command execution, or actions outside those folders. \
+Local actions require explicit user approval; request one action at a time.",
+            automation_folders.join(", ")
+        )
+    };
+    let mut messages = vec![json!({
+        "role": "system",
+        "content": format!("{SYSTEM_PROMPT}{automation_context}"),
+    })];
+    messages.extend(history);
+    messages
+}
+
+fn handle_response(
+    chat: &Chat,
+    conversation_id: &str,
+    automation_folders: &[String],
+    completion: llm_client::ChatReply,
+) -> Result<ChatReply, String> {
+    let response = completion.response;
+    let Some(message) = response
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+    else {
         return Err("Unexpected API response.".into());
     };
-
-    // Store the whole content — tool_use / tool_result blocks included — so the
-    // next turn has the right context.
-    chat.push(&conversation_id, json!({ "role": "assistant", "content": blocks.clone() }));
-
-    let text = blocks
-        .iter()
-        .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-        .filter_map(|b| b.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string();
+    let used_model = completion.model;
+    if let Some(refusal) = message.get("refusal").and_then(Value::as_str) {
+        return Err(refusal.to_string());
+    }
+    if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+        if tool_calls.len() != 1 {
+            return Err("The assistant returned an unsupported number of local actions.".into());
+        }
+        if automation_folders.is_empty() {
+            return Err("No folders are authorized for local automation.".into());
+        }
+        let tool_call = &tool_calls[0];
+        let tool_call_id = tool_call
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| "The assistant returned an invalid local action.".to_string())?;
+        let function = tool_call
+            .get("function")
+            .ok_or_else(|| "The assistant returned an invalid local action.".to_string())?;
+        let name = function
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| automation::supports(name))
+            .ok_or_else(|| "The assistant requested an unsupported local action.".to_string())?;
+        let arguments = function
+            .get("arguments")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "The assistant returned invalid action arguments.".to_string())?;
+        let arguments = serde_json::from_str(arguments)
+            .map_err(|e| format!("The assistant returned invalid action arguments: {e}"))?;
+        let action = automation::prepare(
+            automation::AutomationAction {
+                name: name.to_string(),
+                arguments,
+                preview: None,
+                preview_hash: None,
+            },
+            automation_folders,
+        )?;
+        if chat.action_count(conversation_id) >= MAX_AUTOMATION_ACTIONS {
+            let text = "For safety, I stopped after five local actions. Ask me to continue if you need more.".to_string();
+            chat.push(
+                conversation_id,
+                json!({ "role": "assistant", "content": text }),
+            );
+            chat.reset_action_count(conversation_id);
+            return Ok(ChatReply {
+                text,
+                model: used_model,
+                action: None,
+                provider: completion.provider,
+                fallback_notice: completion.fallback_notice,
+            });
+        }
+        chat.push(conversation_id, message.clone());
+        chat.pending_actions.lock().unwrap().insert(
+            conversation_id.to_string(),
+            PendingAction {
+                tool_call_id: Some(tool_call_id.to_string()),
+                action: action.clone(),
+            },
+        );
+        chat.increment_action_count(conversation_id);
+        return Ok(ChatReply {
+            text: message
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            model: used_model,
+            action: Some(action),
+            provider: completion.provider,
+            fallback_notice: completion.fallback_notice,
+        });
+    }
+    let text = response_text(message);
 
     if text.is_empty() {
-        chat.pop(&conversation_id);
-        chat.pop(&conversation_id);
         return Err("No response text.".into());
     }
-    Ok(ChatReply { text })
+    chat.push(
+        conversation_id,
+        json!({ "role": "assistant", "content": text }),
+    );
+    chat.reset_action_count(conversation_id);
+    Ok(ChatReply {
+        text,
+        model: used_model,
+        action: None,
+        provider: completion.provider,
+        fallback_notice: completion.fallback_notice,
+    })
+}
+
+fn response_text(message: &Value) -> String {
+    let content = message
+        .get("content")
+        .and_then(value_text)
+        .unwrap_or_default();
+    if !content.trim().is_empty() {
+        return content.trim().to_string();
+    }
+    message
+        .get("reasoning")
+        .or_else(|| message.get("reasoning_content"))
+        .and_then(value_text)
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+fn value_text(value: &Value) -> Option<String> {
+    value.as_str().map(str::to_string).or_else(|| {
+        value.as_array().map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    })
 }
 
 fn append_context(
@@ -300,7 +606,11 @@ fn append_context(
             content.push(file_block(path)?);
             content.push(json!({ "type": "text", "text": format!("File: {name}") }));
         }
-        Some(ChatContext::Window { app_name, title, url }) => {
+        Some(ChatContext::Window {
+            app_name,
+            title,
+            url,
+        }) => {
             let mut text = format!("Context — App: {app_name}, Window: {title}");
             if let Some(url) = url {
                 text.push_str(&format!(", URL: {url}"));
@@ -312,107 +622,135 @@ fn append_context(
     Ok(())
 }
 
-struct ApiFailure {
-    message: String,
-    account_limit_reached: bool,
-}
-
-async fn call(key: &str, body: &Value) -> Result<Value, ApiFailure> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(90))
-        .build()
-        .map_err(|e| ApiFailure {
-            message: e.to_string(),
-            account_limit_reached: false,
-        })?;
-
-    let response = client
-        .post(ENDPOINT)
-        .bearer_auth(key)
-        .header("anthropic-version", ANTHROPIC_VERSION)
-        .header("content-type", "application/json")
-        .json(body)
-        .send()
-        .await
-        .map_err(|e| ApiFailure {
-            message: format!("Network error: {e}"),
-            account_limit_reached: false,
-        })?;
-
-    let status = response.status();
-    let text = response.text().await.map_err(|e| ApiFailure {
-        message: e.to_string(),
-        account_limit_reached: false,
-    })?;
-    if !status.is_success() {
-        // Surface the API's own message, which is what makes a bad key obvious.
-        let parsed = serde_json::from_str::<Value>(&text).ok();
-        let detail = parsed
-            .as_ref()
-            .and_then(|value| value.get("error"))
-            .and_then(|error| error.get("message"))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| text.chars().take(200).collect());
-        let code = parsed
-            .as_ref()
-            .and_then(|value| value.get("error"))
-            .and_then(|error| error.get("code"))
-            .and_then(Value::as_i64);
-        let account_limit_reached = is_account_limit(status, code, &detail);
-        return Err(ApiFailure {
-            message: format!("OpenRouter API {status}: {detail}"),
-            account_limit_reached,
-        });
-    }
-
-    serde_json::from_str(&text).map_err(|e| ApiFailure {
-        message: format!("Bad API response: {e}"),
-        account_limit_reached: false,
-    })
-}
-
-fn is_account_limit(status: reqwest::StatusCode, code: Option<i64>, detail: &str) -> bool {
-    let detail = detail.to_ascii_lowercase();
-    status == reqwest::StatusCode::PAYMENT_REQUIRED
-        || code == Some(402)
-        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
-        || code == Some(429)
-        || [
-            "insufficient credits",
-            "not enough credits",
-            "out of credits",
-            "credit balance",
-            "quota exceeded",
-            "budget exceeded",
-        ]
-        .iter()
-        .any(|phrase| detail.contains(phrase))
-}
-
-fn openrouter_model(model: &str) -> String {
-    let slug = match model {
-        "claude-haiku-4-5" => "claude-haiku-4.5",
-        other => other,
-    };
-    if slug.contains('/') {
-        slug.to_string()
-    } else {
-        format!("anthropic/{slug}")
-    }
-}
-
-fn request_body(model: &str, messages: Vec<Value>) -> Value {
-    json!({
-        "model": openrouter_model(model),
-        "max_tokens": MAX_TOKENS,
-        "system": SYSTEM_PROMPT,
-        "tools": [{
-            "type": "openrouter:web_search",
-            "parameters": { "max_uses": 5 },
-        }],
-        "messages": messages,
-    })
+fn automation_tools() -> Value {
+    json!([
+        {
+            "type": "function",
+            "function": {
+                "name": "open_app",
+                "description": "Open an installed app by its exact Windows Start menu shortcut name. Requires explicit user approval.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "appName": { "type": "string" } },
+                    "required": ["appName"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_directory",
+                "description": "List names and types in a directory inside an authorized folder.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string", "description": "Absolute authorized path or path relative to an authorized folder." } },
+                    "required": ["path"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a small UTF-8 text file inside an authorized folder. The contents are sent to the configured AI provider.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "open_path",
+                "description": "Open a folder or file from an authorized folder in the system file manager.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "create_directory",
+                "description": "Create one new folder inside an authorized folder. Does not create parents or overwrite.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "create_file",
+                "description": "Create a new UTF-8 text file inside an authorized folder. Fails if the file already exists.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "content": { "type": "string" }
+                    },
+                    "required": ["path", "content"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Replace all contents of an existing UTF-8 text file inside an authorized folder. Show the proposed contents and get explicit user approval first. A backup is created.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "content": { "type": "string" }
+                    },
+                    "required": ["path", "content"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "erase_file_content",
+                "description": "Clear all contents of an existing file inside an authorized folder. Show the current contents and get explicit user approval first. A backup is created.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "move_file",
+                "description": "Move a file to a new path on the same filesystem inside an authorized folder. Does not overwrite existing files.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "destination": { "type": "string" }
+                    },
+                    "required": ["path", "destination"],
+                    "additionalProperties": false
+                }
+            }
+        }
+    ])
 }
 
 /// PDF → document block, image → image block, text/code → inline text.
@@ -435,10 +773,24 @@ fn file_block(path: &str) -> Result<Value, String> {
 
     if let Some((block_type, media)) = media_type {
         let bytes = std::fs::read(path).map_err(|e| format!("Cannot read attachment: {e}"))?;
-        return Ok(json!({
-            "type": block_type,
-            "source": { "type": "base64", "media_type": media, "data": base64(&bytes) },
-        }));
+        let data_url = format!("data:{media};base64,{}", base64(&bytes));
+        return Ok(if block_type == "image" {
+            json!({
+                "type": "image_url",
+                "image_url": { "url": data_url },
+            })
+        } else {
+            json!({
+                "type": "file",
+                "file": {
+                    "filename": std::path::Path::new(path)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("attachment.pdf"),
+                    "file_data": data_url,
+                },
+            })
+        });
     }
 
     let len = std::fs::metadata(path)
@@ -465,12 +817,24 @@ fn base64(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(TABLE[(n >> 18) as usize & 63] as char);
         out.push(TABLE[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -478,61 +842,55 @@ fn base64(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_context, base64, file_block, is_account_limit, openrouter_model, request_body,
+        append_context, base64, file_block, handle_response, provider_messages, response_text,
         Chat, ChatContext, ChatHistoryMessage, SharedContextFile, SharedConversationContext,
-        DEFAULT_MODEL,
     };
+    use crate::llm_client::ChatReply as LlmReply;
     use std::fs;
 
     #[test]
-    fn request_uses_nemotron_free_and_openrouter_search() {
-        let body = request_body(DEFAULT_MODEL, Vec::new());
-
-        assert_eq!(body["model"], DEFAULT_MODEL);
-        assert_eq!(body["tools"][0]["type"], "openrouter:web_search");
-        assert_eq!(body["tools"][0]["parameters"]["max_uses"], 5);
-    }
-
-    #[test]
-    fn openrouter_model_uses_provider_slugs() {
-        assert_eq!(openrouter_model("claude-opus-5"), "anthropic/claude-opus-5");
-        assert_eq!(openrouter_model("claude-sonnet-5"), "anthropic/claude-sonnet-5");
-        assert_eq!(openrouter_model("claude-haiku-4-5"), "anthropic/claude-haiku-4.5");
-        assert_eq!(openrouter_model("other/provider-model"), "other/provider-model");
-    }
-
-    #[test]
-    fn credit_and_rate_limit_errors_trigger_key_failover() {
-        assert!(is_account_limit(
-            reqwest::StatusCode::PAYMENT_REQUIRED,
-            None,
-            "Payment required",
-        ));
-        assert!(is_account_limit(
-            reqwest::StatusCode::BAD_REQUEST,
-            Some(402),
-            "Insufficient credits",
-        ));
-        assert!(is_account_limit(
-            reqwest::StatusCode::FORBIDDEN,
-            None,
-            "Account has insufficient credits",
-        ));
-        assert!(is_account_limit(
-            reqwest::StatusCode::TOO_MANY_REQUESTS,
-            None,
-            "Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day",
-        ));
-        assert!(is_account_limit(
-            reqwest::StatusCode::TOO_MANY_REQUESTS,
-            Some(429),
-            "Too many requests",
-        ));
-        assert!(!is_account_limit(
-            reqwest::StatusCode::UNAUTHORIZED,
-            None,
-            "Invalid API key",
-        ));
+    fn tool_call_is_returned_as_a_pending_user_approval() {
+        let chat = Chat::default();
+        let response = serde_json::json!({
+            "model": "test/model",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "list_directory",
+                            "arguments": "{\"path\":\"notes\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        let folder = std::env::temp_dir().join(format!("coucou-tool-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(folder.join("notes")).unwrap();
+        let folders = vec![folder.to_string_lossy().into_owned()];
+        let reply = handle_response(
+            &chat,
+            "conversation",
+            &folders,
+            LlmReply {
+                response,
+                provider: "ollama".into(),
+                model: "qwen2.5:7b".into(),
+                fallback_notice: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(reply.action.as_ref().unwrap().name, "list_directory");
+        assert!(chat
+            .pending_actions
+            .lock()
+            .unwrap()
+            .contains_key("conversation"));
+        std::fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]
@@ -560,9 +918,21 @@ mod tests {
         let image_path = dir.join("pixel.png");
         fs::write(&image_path, b"png bytes").unwrap();
         let image = file_block(image_path.to_str().unwrap()).unwrap();
-        assert_eq!(image["type"], "image");
-        assert_eq!(image["source"]["media_type"], "image/png");
-        assert_eq!(image["source"]["data"], base64(b"png bytes"));
+        assert_eq!(image["type"], "image_url");
+        assert_eq!(
+            image["image_url"]["url"],
+            format!("data:image/png;base64,{}", base64(b"png bytes"))
+        );
+
+        let pdf_path = dir.join("document.pdf");
+        fs::write(&pdf_path, b"%PDF test").unwrap();
+        let pdf = file_block(pdf_path.to_str().unwrap()).unwrap();
+        assert_eq!(pdf["type"], "file");
+        assert_eq!(pdf["file"]["filename"], "document.pdf");
+        assert_eq!(
+            pdf["file"]["file_data"],
+            format!("data:application/pdf;base64,{}", base64(b"%PDF test"))
+        );
 
         let binary_path = dir.join("document.docx");
         fs::write(&binary_path, [0xff, 0xfe]).unwrap();
@@ -582,8 +952,14 @@ mod tests {
     fn conversation_histories_are_isolated_and_can_be_restored() {
         let chat = Chat::default();
         let history = vec![
-            ChatHistoryMessage { role: "user".into(), content: "Summarize this".into() },
-            ChatHistoryMessage { role: "assistant".into(), content: "A short summary".into() },
+            ChatHistoryMessage {
+                role: "user".into(),
+                content: "Summarize this".into(),
+            },
+            ChatHistoryMessage {
+                role: "assistant".into(),
+                content: "A short summary".into(),
+            },
         ];
 
         chat.seed_history("first", &history, None, &[]).unwrap();
@@ -594,19 +970,30 @@ mod tests {
 
         chat.seed_history("first", &[], None, &[]).unwrap();
         assert_eq!(chat.snapshot("first").len(), 2);
-        assert!(chat.seed_history(
-            "invalid",
-            &[ChatHistoryMessage { role: "system".into(), content: "no".into() }],
-            None,
-            &[],
-        ).is_err());
+        assert!(chat
+            .seed_history(
+                "invalid",
+                &[ChatHistoryMessage {
+                    role: "system".into(),
+                    content: "no".into()
+                }],
+                None,
+                &[],
+            )
+            .is_err());
     }
 
     #[test]
     fn deleting_conversation_clears_only_its_model_history() {
         let chat = Chat::default();
-        chat.push("first", serde_json::json!({ "role": "user", "content": [] }));
-        chat.push("second", serde_json::json!({ "role": "user", "content": [] }));
+        chat.push(
+            "first",
+            serde_json::json!({ "role": "user", "content": [] }),
+        );
+        chat.push(
+            "second",
+            serde_json::json!({ "role": "user", "content": [] }),
+        );
 
         chat.delete("first");
 
@@ -622,7 +1009,10 @@ mod tests {
         fs::write(&path, "private local file contents").unwrap();
 
         let chat = Chat::default();
-        let history = [ChatHistoryMessage { role: "user".into(), content: "What is this?".into() }];
+        let history = [ChatHistoryMessage {
+            role: "user".into(),
+            content: "What is this?".into(),
+        }];
         chat.seed_history(
             "file-conversation",
             &history,
@@ -646,7 +1036,10 @@ mod tests {
             .unwrap()
             .contains("earlier"));
         assert_eq!(seeded[0]["content"][1]["text"], "User: remember this");
-        assert_eq!(seeded[0]["content"][2]["text"], "File contents:\nprivate local file contents");
+        assert_eq!(
+            seeded[0]["content"][2]["text"],
+            "File contents:\nprivate local file contents"
+        );
         assert_eq!(seeded[0]["content"][3]["text"], "File: note.txt");
         assert_eq!(seeded[0]["content"][4]["text"], "What is this?");
 
@@ -663,8 +1056,14 @@ mod tests {
         let previous = [SharedConversationContext {
             title: "Reference chat".into(),
             messages: vec![
-                ChatHistoryMessage { role: "user".into(), content: "Remember the project name".into() },
-                ChatHistoryMessage { role: "assistant".into(), content: "The project is Mochi".into() },
+                ChatHistoryMessage {
+                    role: "user".into(),
+                    content: "Remember the project name".into(),
+                },
+                ChatHistoryMessage {
+                    role: "assistant".into(),
+                    content: "The project is Mochi".into(),
+                },
             ],
             file: Some(SharedContextFile {
                 name: "reference.txt".into(),
@@ -674,10 +1073,52 @@ mod tests {
         let mut blocks = Vec::new();
         append_context(&mut blocks, None, &previous).unwrap();
 
-        assert!(blocks.iter().any(|block| block["text"] == "User: Remember the project name"));
-        assert!(blocks.iter().any(|block| block["text"] == "Assistant: The project is Mochi"));
-        assert!(blocks.iter().any(|block| block["text"] == "File contents:\nshared attachment facts"));
+        assert!(blocks
+            .iter()
+            .any(|block| block["text"] == "User: Remember the project name"));
+        assert!(blocks
+            .iter()
+            .any(|block| block["text"] == "Assistant: The project is Mochi"));
+        assert!(blocks
+            .iter()
+            .any(|block| block["text"] == "File contents:\nshared attachment facts"));
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn final_answer_content_takes_precedence_over_reasoning() {
+        let message = serde_json::json!({
+            "content": "Final answer",
+            "reasoning": "private reasoning",
+            "reasoning_content": "also private",
+        });
+        assert_eq!(response_text(&message), "Final answer");
+    }
+
+    #[test]
+    fn reasoning_is_used_only_when_no_final_content_exists() {
+        let message = serde_json::json!({
+            "content": "",
+            "reasoning_content": "fallback content",
+        });
+        assert_eq!(response_text(&message), "fallback content");
+    }
+
+    #[test]
+    fn provider_history_keeps_system_prompt_and_only_recent_twenty_messages() {
+        let history = (0..25)
+            .map(|index| {
+                serde_json::json!({
+                    "role": if index % 2 == 0 { "user" } else { "assistant" },
+                    "content": index.to_string(),
+                })
+            })
+            .collect();
+        let messages = provider_messages(history, &[]);
+        assert_eq!(messages.len(), 21);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["content"], "5");
+        assert_eq!(messages.last().unwrap()["content"], "24");
     }
 }

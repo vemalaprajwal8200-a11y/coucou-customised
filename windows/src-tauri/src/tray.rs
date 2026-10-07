@@ -16,7 +16,12 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let sep2 = PredefinedMenuItem::separator(app)?;
     let sep3 = PredefinedMenuItem::separator(app)?;
 
-    let menu = Menu::with_items(app, &[&open, &sep1, &settings, &pause, &sep2, &auto_hide, &sep3, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &open, &sep1, &settings, &pause, &sep2, &auto_hide, &sep3, &quit,
+        ],
+    )?;
 
     let mut builder = TrayIconBuilder::with_id("coucou")
         .tooltip("Coucou")

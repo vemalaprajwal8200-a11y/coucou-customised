@@ -1,24 +1,30 @@
 // Coucou for Windows — app wiring and the commands the island calls.
 
+mod automation;
 mod claude;
 mod files;
 mod hooks;
 mod integrations;
 mod island;
+mod llm_client;
 mod log;
 mod pipe;
 mod platform;
 mod secrets;
 mod settings;
 mod tray;
+mod voice;
 
 use std::process::Command;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use tauri::webview::{PermissionKind, PermissionResponse};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
-use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 use claude::{Chat, ChatContext, ChatHistoryMessage, ChatReply, SharedConversationContext};
 use files::DroppedFile;
@@ -27,9 +33,24 @@ use island::{PollGate, ScreenInfo};
 use pipe::Pending;
 use settings::Settings;
 
+const HOTKEY: &str = "CTRL+ALT+SPACE";
+const HOTKEY_DEBOUNCE: Duration = Duration::from_millis(300);
+static LAST_VOICE_HOTKEY: std::sync::OnceLock<Mutex<Option<Instant>>> = std::sync::OnceLock::new();
+
 pub struct Shared {
     pub settings: Mutex<Settings>,
     pub gate: Arc<PollGate>,
+}
+
+fn accept_voice_hotkey() -> bool {
+    let last = LAST_VOICE_HOTKEY.get_or_init(|| Mutex::new(None));
+    let mut last = last.lock().unwrap();
+    let now = Instant::now();
+    if last.is_some_and(|previous| now.duration_since(previous) < HOTKEY_DEBOUNCE) {
+        return false;
+    }
+    *last = Some(now);
+    true
 }
 
 #[derive(Serialize)]
@@ -60,7 +81,8 @@ fn boot(app: AppHandle, shared: State<Shared>) -> BootInfo {
 }
 
 #[tauri::command]
-fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
+fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) -> Result<(), String> {
+    settings::save(&settings).map_err(|err| format!("Could not save settings: {err}"))?;
     let (screen_changed, autostart_changed) = {
         let mut current = shared.settings.lock().unwrap();
         let screen_changed = current.screen != settings.screen;
@@ -68,12 +90,13 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
         *current = settings.clone();
         (screen_changed, autostart_changed)
     };
-    if let Err(err) = settings::save(&settings) {
-        eprintln!("[coucou] could not save settings: {err}");
-    }
     if autostart_changed {
         let manager = app.autolaunch();
-        let result = if settings.autostart { manager.enable() } else { manager.disable() };
+        let result = if settings.autostart {
+            manager.enable()
+        } else {
+            manager.disable()
+        };
         if let Err(err) = result {
             eprintln!("[coucou] autostart: {err}");
         }
@@ -84,6 +107,7 @@ fn save_settings(app: AppHandle, shared: State<Shared>, settings: Settings) {
     }
     // Keep the other window in step (island ⇄ settings window).
     let _ = app.emit("settings-changed", settings);
+    Ok(())
 }
 
 /// Hidden island → shrink the window to the wake strip. Auto-hide keeps the
@@ -98,13 +122,20 @@ fn set_collapsed(app: AppHandle, shared: State<Shared>, collapsed: bool) {
     }
     // The wake strip must always take the mouse, and a resize invalidates the flag.
     island::refresh_click_through(&app, &shared.gate);
-    shared.gate.set_active(!collapsed || shared.gate.auto_hide_enabled());
+    shared
+        .gate
+        .set_active(!collapsed || shared.gate.auto_hide_enabled());
 }
 
 /// The front end pushes the island shape; Rust decides click-through from it.
 #[tauri::command]
 fn set_island_rect(app: AppHandle, shared: State<Shared>, x: f64, y: f64, width: f64, height: f64) {
-    shared.gate.set_rect(island::IslandRect { x, y, w: width, h: height });
+    shared.gate.set_rect(island::IslandRect {
+        x,
+        y,
+        w: width,
+        h: height,
+    });
     // Without the cursor poll the input region is the click-through: it follows the island.
     if !platform::CURSOR_POLL {
         island::refresh_click_through(&app, &shared.gate);
@@ -113,7 +144,9 @@ fn set_island_rect(app: AppHandle, shared: State<Shared>, x: f64, y: f64, width:
 
 #[tauri::command]
 fn focus_window(app: AppHandle, focused: bool) {
-    let Some(win) = island::window(&app) else { return };
+    let Some(win) = island::window(&app) else {
+        return;
+    };
     platform::set_activating(&win, focused);
     if focused {
         let _ = win.set_focus();
@@ -171,6 +204,16 @@ fn open_in_vscode(path: Option<String>) -> bool {
 #[tauri::command]
 fn quit_app(app: AppHandle) {
     app.exit(0);
+}
+
+#[tauri::command]
+fn set_voice_active(app: AppHandle, shared: State<Shared>, active: bool) {
+    island::set_voice_active(&app, &shared.gate, active);
+}
+
+#[tauri::command]
+fn set_wake_conversation_active(app: AppHandle, shared: State<Shared>, active: bool) {
+    island::set_wake_conversation_active(&app, &shared.gate, active);
 }
 
 /// Tray → Pause. Paused means paused: the pollers stop talking to the network,
@@ -257,11 +300,89 @@ async fn chat_send(
     conversation_id: String,
     history: Vec<ChatHistoryMessage>,
     query: String,
+    request_id: String,
+    local_only: Option<bool>,
+    voice_request: Option<bool>,
     context: Option<ChatContext>,
     shared_context: Vec<SharedConversationContext>,
 ) -> Result<ChatReply, String> {
-    let model = shared.settings.lock().unwrap().model.clone();
-    claude::send(&chat, conversation_id, history, &model, query, context, shared_context).await
+    let mut cancel = chat.begin_request(&request_id)?;
+    let (model, automation_folders, provider_mode, ollama_model) = {
+        let settings = shared.settings.lock().unwrap();
+        (
+            settings.model.clone(),
+            settings.automation_folders.clone(),
+            if local_only.unwrap_or(false) {
+                "ollamaOnly".to_string()
+            } else if voice_request.unwrap_or(false) && settings.provider_mode == "auto" {
+                "voiceAuto".to_string()
+            } else {
+                settings.provider_mode.clone()
+            },
+            settings.ollama_model.clone(),
+        )
+    };
+    let result = claude::send(
+        &chat,
+        conversation_id,
+        history,
+        &model,
+        query,
+        context,
+        shared_context,
+        &automation_folders,
+        &provider_mode,
+        &ollama_model,
+        &mut cancel,
+    )
+    .await;
+    chat.finish_request(&request_id);
+    result
+}
+
+#[tauri::command]
+async fn chat_action(
+    shared: State<'_, Shared>,
+    chat: State<'_, Chat>,
+    conversation_id: String,
+    approved: bool,
+    selected_app_id: Option<String>,
+    request_id: String,
+) -> Result<ChatReply, String> {
+    let mut cancel = chat.begin_request(&request_id)?;
+    let (model, automation_folders, provider_mode, ollama_model) = {
+        let settings = shared.settings.lock().unwrap();
+        (
+            settings.model.clone(),
+            settings.automation_folders.clone(),
+            settings.provider_mode.clone(),
+            settings.ollama_model.clone(),
+        )
+    };
+    let result = claude::resolve_action(
+        &chat,
+        &conversation_id,
+        &model,
+        approved,
+        selected_app_id,
+        &automation_folders,
+        &provider_mode,
+        &ollama_model,
+        &mut cancel,
+    )
+    .await;
+    chat.finish_request(&request_id);
+    result
+}
+
+#[tauri::command]
+fn chat_cancel(chat: State<Chat>, request_id: String) -> Result<(), String> {
+    chat.cancel_request(&request_id)
+}
+
+#[tauri::command]
+async fn ollama_status(refresh: Option<bool>) -> llm_client::OllamaStatus {
+    llm_client::ollama_status(refresh.unwrap_or(false)).await
 }
 
 #[tauri::command]
@@ -409,16 +530,37 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state == ShortcutState::Pressed && accept_voice_hotkey() {
+                        if let Some(shared) = app.try_state::<Shared>() {
+                            island::request_auto_reveal(app, &shared.gate);
+                        }
+                        let _ = app.emit_to(island::WINDOW_LABEL, "voice-hotkey", ());
+                    }
+                })
+                .build(),
+        )
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             let _ = app.emit_to(island::WINDOW_LABEL, "tray", "open".to_string());
         }))
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .on_permission_request(|_, permission| match permission {
+            PermissionKind::Microphone => PermissionResponse::Allow,
+            _ => PermissionResponse::Default,
+        })
         .manage(Shared {
             settings: Mutex::new(loaded.clone()),
             gate: gate.clone(),
         })
         .manage(Pending::default())
         .manage(Chat::default())
+        .manage(voice::SttProcess::default())
+        .manage(voice::TtsProcess::default())
         .invoke_handler(tauri::generate_handler![
             boot,
             save_settings,
@@ -437,6 +579,14 @@ pub fn run() {
             approval_decline,
             log_line,
             chat_send,
+            chat_action,
+            chat_cancel,
+            set_voice_active,
+            set_wake_conversation_active,
+            voice::tts_speak,
+            voice::tts_stop,
+            voice::tts_is_speaking,
+            ollama_status,
             chat_reset,
             chat_delete,
             ingest_file,
@@ -456,6 +606,17 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
             tray::build(&handle)?;
+            if let Ok(shortcut) = HOTKEY.parse::<Shortcut>() {
+                if let Err(error) = app.global_shortcut().register(shortcut) {
+                    log::line(format!("could not register {HOTKEY}: {error}"));
+                }
+            } else {
+                log::line(format!("invalid voice hotkey: {HOTKEY}"));
+            }
+            voice::start_stt_server(&handle, &app.state::<voice::SttProcess>());
+            tauri::async_runtime::spawn(async {
+                let _ = llm_client::ollama_status(false).await;
+            });
             // Before the island: see create_settings_window.
             create_settings_window(&handle);
             // Remove WebView2's child drop target once both webviews exist so
@@ -464,6 +625,7 @@ pub fn run() {
 
             if let Some(win) = island::window(&handle) {
                 platform::make_non_activating(&win);
+                island::prepare_launch_visibility(&gate);
                 island::apply_geometry(&handle, &loaded.screen, false);
                 let _ = win.show();
             }
@@ -474,12 +636,26 @@ pub fn run() {
             gate.set_active(true);
             island::spawn_cursor_poll(handle.clone(), gate.clone());
 
-            log::line(format!("--- Coucou {} started ---", env!("CARGO_PKG_VERSION")));
+            log::line(format!(
+                "--- Coucou {} started ---",
+                env!("CARGO_PKG_VERSION")
+            ));
             hooks::ensure_hook_exe(&handle);
             pipe::start(handle.clone());
             integrations::start(handle.clone());
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Coucou");
+        .build(tauri::generate_context!())
+        .expect("error while building Coucou")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Err(error) = app.global_shortcut().unregister_all() {
+                    log::line(format!("could not unregister global shortcuts: {error}"));
+                }
+                voice::stop_stt_server(&app.state::<voice::SttProcess>());
+                if let Err(error) = app.state::<voice::TtsProcess>().stop() {
+                    log::line(format!("SAPI shutdown failed: {error}"));
+                }
+            }
+        });
 }

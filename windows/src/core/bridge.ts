@@ -3,7 +3,7 @@
 // `npm run dev` alone.
 
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { ChatMessage, Settings, SharedConversationContext } from "./state";
@@ -40,6 +40,7 @@ export const Bridge = {
   boot: () => call<BootInfo>("boot"),
 
   saveSettings: (settings: Settings) => call<void>("save_settings", { settings }),
+  saveSettingsStrict: (settings: Settings) => callOrThrow<void>("save_settings", { settings }),
 
   /** Shrink the window down to the invisible wake strip (hidden) or back to full. */
   setCollapsed: (collapsed: boolean) => call<void>("set_collapsed", { collapsed }),
@@ -94,13 +95,46 @@ export const Bridge = {
     query: string,
     context: ChatContext | null,
     sharedContext: SharedConversationContext[],
-  ) => callOrThrow<{ text: string }>("chat_send", {
+    requestId: string,
+    localOnly = false,
+    voiceRequest = false,
+  ) => callOrThrow<ChatReply>("chat_send", {
     conversationId,
     history,
     query,
     context,
     sharedContext,
+    requestId,
+    localOnly,
+    voiceRequest,
   }),
+  chatAction: (
+    conversationId: string,
+    approved: boolean,
+    requestId: string,
+    selectedAppId?: string,
+  ) => callOrThrow<ChatReply>("chat_action", {
+    conversationId,
+    approved,
+    requestId,
+    selectedAppId,
+  }),
+  chatCancel: (requestId: string) =>
+    callOrThrow<void>("chat_cancel", { requestId }),
+  setVoiceActive: (active: boolean) =>
+    callOrThrow<void>("set_voice_active", { active }),
+  setWakeConversationActive: (active: boolean) =>
+    callOrThrow<void>("set_wake_conversation_active", { active }),
+  setWakeCalibration: async (active: boolean) => {
+    if (!IS_TAURI) return;
+    await emit("wake-calibration", active);
+  },
+  ttsSpeak: (text: string, rate: number, volume: number) =>
+    callOrThrow<void>("tts_speak", { text, rate, volume }),
+  ttsStop: () => callOrThrow<void>("tts_stop"),
+  ttsIsSpeaking: () => callOrThrow<boolean>("tts_is_speaking"),
+  ollamaStatus: (refresh = false) =>
+    callOrThrow<OllamaStatus>("ollama_status", { refresh }),
   chatDelete: (conversationId: string) =>
     callOrThrow<void>("chat_delete", { conversationId }),
   chatReset: () => call<void>("chat_reset"),
@@ -110,6 +144,11 @@ export const Bridge = {
   async pickFile(): Promise<string | null> {
     if (!IS_TAURI) return null;
     const selected = await open({ multiple: false, directory: false });
+    return Array.isArray(selected) ? selected[0] ?? null : selected;
+  },
+  async pickAutomationFolder(): Promise<string | null> {
+    if (!IS_TAURI) return null;
+    const selected = await open({ multiple: false, directory: true });
     return Array.isArray(selected) ? selected[0] ?? null : selected;
   },
   /** Only ever tells you whether a key exists — never its value. */
@@ -151,6 +190,27 @@ export interface DroppedFile {
   name: string;
   path: string;
   size: number;
+}
+
+export interface ChatReply {
+  text: string;
+  model: string;
+  action: AutomationAction | null;
+  provider: string;
+  fallbackNotice: string | null;
+}
+
+export interface OllamaStatus {
+  reachable: boolean;
+  models: string[];
+  error: string | null;
+}
+
+export interface AutomationAction {
+  name: string;
+  arguments: Record<string, unknown>;
+  preview?: string | null;
+  previewHash?: number | null;
 }
 
 export interface HookStatus {

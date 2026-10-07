@@ -106,7 +106,9 @@ pub fn start(app: AppHandle) {
 
     tauri::async_runtime::spawn(async move {
         let Some(path) = crate::platform::relay_socket_path() else {
-            log::line("no private runtime directory ($XDG_RUNTIME_DIR) — Claude Code hooks are inactive");
+            log::line(
+                "no private runtime directory ($XDG_RUNTIME_DIR) — Claude Code hooks are inactive",
+            );
             return;
         };
         // A socket file left behind by a crash answers nothing and can go. One
@@ -184,7 +186,9 @@ async fn handle(app: AppHandle, mut pipe: impl Relay) {
         Some(i) => &buf[..i],
         None => &buf[..],
     };
-    let Ok(mut payload) = serde_json::from_slice::<Value>(line) else { return };
+    let Ok(mut payload) = serde_json::from_slice::<Value>(line) else {
+        return;
+    };
     if !payload.is_object() {
         return;
     }
@@ -202,7 +206,11 @@ async fn handle(app: AppHandle, mut pipe: impl Relay) {
         return;
     }
 
-    let id = format!("{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed));
+    let id = format!(
+        "{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
     let (tx, mut rx) = mpsc::channel::<Reply>(4);
     {
         let pending = app.state::<Pending>();
@@ -239,7 +247,9 @@ async fn wait_for_decision(id: &str, rx: &mut mpsc::Receiver<Reply>) -> Option<S
         }
         Ok(None) => return None,
         Err(_) => {
-            log::line(format!("hook id={id} island never acknowledged — terminal takes over"));
+            log::line(format!(
+                "hook id={id} island never acknowledged — terminal takes over"
+            ));
             return None;
         }
     }
@@ -264,7 +274,11 @@ fn send(app: &AppHandle, request_id: &str, reply: Reply, keep: bool) {
     let sender = {
         let pending = app.state::<Pending>();
         let mut map = pending.0.lock().unwrap();
-        if keep { map.get(request_id).cloned() } else { map.remove(request_id) }
+        if keep {
+            map.get(request_id).cloned()
+        } else {
+            map.remove(request_id)
+        }
     };
     match sender {
         Some(tx) => {

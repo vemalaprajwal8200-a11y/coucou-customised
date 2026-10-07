@@ -22,6 +22,7 @@ pub const STRIP_W: f64 = 240.0;
 pub const STRIP_H: f64 = 6.0;
 
 pub const AUTO_HIDE_DELAY_MS: u64 = 5000;
+pub const LAUNCH_VISIBLE_MS: u64 = 10_000;
 pub const TRIGGER_ZONE_HEIGHT_PX: i32 = 2;
 pub const TRIGGER_MARGIN_PX: i32 = 100;
 pub const ANIMATION_MS: u64 = 220;
@@ -58,7 +59,11 @@ impl AutoHideController {
     fn new(enabled: bool) -> Self {
         Self {
             enabled,
-            phase: if enabled { AutoHidePhase::Hidden } else { AutoHidePhase::Visible },
+            phase: if enabled {
+                AutoHidePhase::Hidden
+            } else {
+                AutoHidePhase::Visible
+            },
             animation_started: None,
             animation_from_y: 0,
             hide_deadline: None,
@@ -99,6 +104,8 @@ pub struct PollGate {
     active: Mutex<bool>,
     cv: Condvar,
     pub collapsed: AtomicBool,
+    voice_active: AtomicBool,
+    wake_conversation_active: AtomicBool,
     pub rect: Mutex<IslandRect>,
     /// Mirrors the window flag so we only call into the OS when it changes.
     ignoring: AtomicBool,
@@ -111,6 +118,8 @@ impl PollGate {
             active: Mutex::new(false),
             cv: Condvar::new(),
             collapsed: AtomicBool::new(true),
+            voice_active: AtomicBool::new(false),
+            wake_conversation_active: AtomicBool::new(false),
             rect: Mutex::new(IslandRect::default()),
             ignoring: AtomicBool::new(false),
             auto_hide: Mutex::new(AutoHideController::new(auto_hide)),
@@ -156,6 +165,20 @@ impl PollGate {
     }
 }
 
+/// Start at the visible position, then let normal auto-hide resume after the
+/// launch grace period. Other auto-hide interactions remain unchanged.
+pub fn prepare_launch_visibility(gate: &PollGate) {
+    let now = Instant::now();
+    let mut controller = gate.auto_hide.lock().unwrap();
+    controller.phase = AutoHidePhase::Visible;
+    controller.animation_started = None;
+    controller.hide_deadline = controller
+        .enabled
+        .then(|| now + Duration::from_millis(LAUNCH_VISIBLE_MS));
+    controller.hovering = false;
+    controller.reveal_requested = false;
+}
+
 pub fn window(app: &AppHandle) -> Option<WebviewWindow> {
     app.get_webview_window(WINDOW_LABEL)
 }
@@ -199,14 +222,22 @@ pub fn screen_info(app: &AppHandle, pref: &str) -> ScreenInfo {
                 scale,
             }
         }
-        None => ScreenInfo { x: 0.0, y: 0.0, width: 1920.0, height: 1080.0, scale: 1.0 },
+        None => ScreenInfo {
+            x: 0.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1080.0,
+            scale: 1.0,
+        },
     }
 }
 
 /// Places and sizes the window. `collapsed` picks the wake strip instead of the panel.
 pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool) {
     let Some(win) = window(app) else { return };
-    let Some(m) = target_monitor(app, pref) else { return };
+    let Some(m) = target_monitor(app, pref) else {
+        return;
+    };
 
     let scale = m.scale_factor();
     let mp = *m.position();
@@ -216,7 +247,11 @@ pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool) {
         .try_state::<crate::Shared>()
         .map(|shared| shared.gate.auto_hide_enabled())
         .unwrap_or(false);
-    let (lw, lh) = if collapsed && !auto_hide { (STRIP_W, STRIP_H) } else { (PANEL_W, PANEL_H) };
+    let (lw, lh) = if collapsed && !auto_hide {
+        (STRIP_W, STRIP_H)
+    } else {
+        (PANEL_W, PANEL_H)
+    };
     let pw = (lw * scale).round().max(1.0) as u32;
     let ph = (lh * scale).round().max(1.0) as u32;
     let x = mp.x + (ms.width as i32 - pw as i32) / 2;
@@ -224,13 +259,13 @@ pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool) {
     let y = if auto_hide {
         app.try_state::<crate::Shared>()
             .map(|shared| {
-            let controller = shared.gate.auto_hide.lock().unwrap();
-            match controller.phase {
-                AutoHidePhase::Hidden => mp.y - ph as i32 - HIDDEN_EDGE_GAP_PX,
-                AutoHidePhase::Revealing | AutoHidePhase::Hiding => current_y,
-                AutoHidePhase::Visible => mp.y,
-            }
-        })
+                let controller = shared.gate.auto_hide.lock().unwrap();
+                match controller.phase {
+                    AutoHidePhase::Hidden => mp.y - ph as i32 - HIDDEN_EDGE_GAP_PX,
+                    AutoHidePhase::Revealing | AutoHidePhase::Hiding => current_y,
+                    AutoHidePhase::Visible => mp.y,
+                }
+            })
             .unwrap_or(mp.y)
     } else {
         mp.y
@@ -256,8 +291,8 @@ pub fn set_auto_hide_enabled(app: &AppHandle, gate: &PollGate, enabled: bool) {
         controller.enabled = enabled;
         controller.phase = AutoHidePhase::Visible;
         controller.animation_started = None;
-        controller.hide_deadline = enabled
-            .then(|| Instant::now() + Duration::from_millis(AUTO_HIDE_DELAY_MS));
+        controller.hide_deadline =
+            enabled.then(|| Instant::now() + Duration::from_millis(AUTO_HIDE_DELAY_MS));
         controller.hovering = false;
         controller.reveal_requested = false;
     }
@@ -290,11 +325,39 @@ pub fn request_auto_reveal(app: &AppHandle, gate: &PollGate) {
         controller.hide_deadline = Some(Instant::now() + Duration::from_millis(AUTO_HIDE_DELAY_MS));
     }
     if !platform::fullscreen_app_active(current_display_bounds(app))
-        && matches!(controller.phase, AutoHidePhase::Hidden | AutoHidePhase::Hiding)
+        && matches!(
+            controller.phase,
+            AutoHidePhase::Hidden | AutoHidePhase::Hiding
+        )
     {
         controller.reveal_requested = false;
         controller.hovering = false;
         begin_transition(&mut controller, AutoHidePhase::Revealing, current_y);
+    }
+}
+
+pub fn set_voice_active(app: &AppHandle, gate: &PollGate, active: bool) {
+    gate.voice_active.store(active, Ordering::Relaxed);
+    if active {
+        request_auto_reveal(app, gate);
+        return;
+    }
+    let mut controller = gate.auto_hide.lock().unwrap();
+    if controller.phase == AutoHidePhase::Visible && controller.enabled {
+        controller.hide_deadline = Some(Instant::now() + Duration::from_millis(AUTO_HIDE_DELAY_MS));
+    }
+}
+
+pub fn set_wake_conversation_active(app: &AppHandle, gate: &PollGate, active: bool) {
+    gate.wake_conversation_active
+        .store(active, Ordering::Relaxed);
+    if active {
+        request_auto_reveal(app, gate);
+        return;
+    }
+    let mut controller = gate.auto_hide.lock().unwrap();
+    if controller.phase == AutoHidePhase::Visible && controller.enabled {
+        controller.hide_deadline = Some(Instant::now() + Duration::from_millis(AUTO_HIDE_DELAY_MS));
     }
 }
 
@@ -335,12 +398,18 @@ fn advance_auto_hide(
         .try_state::<crate::Shared>()
         .map(|shared| shared.settings.lock().unwrap().screen.clone())
         .unwrap_or_else(|| "primary".into());
-    let Some(monitor) = target_monitor(app, &pref) else { return false };
+    let Some(monitor) = target_monitor(app, &pref) else {
+        return false;
+    };
     let monitor_pos = *monitor.position();
     let monitor_size = *monitor.size();
     let scale = monitor.scale_factor();
-    let Ok(position) = win.outer_position() else { return false };
-    let Ok(size) = win.outer_size() else { return false };
+    let Ok(position) = win.outer_position() else {
+        return false;
+    };
+    let Ok(size) = win.outer_size() else {
+        return false;
+    };
     let visible_y = monitor_pos.y;
     let hidden_y = visible_y - size.height as i32 - HIDDEN_EDGE_GAP_PX;
     let notch_width = (STRIP_W * scale).round() as i32;
@@ -367,7 +436,10 @@ fn advance_auto_hide(
 
     let mut controller = gate.auto_hide.lock().unwrap();
     if fullscreen {
-        if !matches!(controller.phase, AutoHidePhase::Hidden | AutoHidePhase::Hiding) {
+        if !matches!(
+            controller.phase,
+            AutoHidePhase::Hidden | AutoHidePhase::Hiding
+        ) {
             begin_transition(&mut controller, AutoHidePhase::Hiding, position.y);
         }
     } else {
@@ -375,12 +447,22 @@ fn advance_auto_hide(
             controller.reveal_requested = false;
             if controller.phase == AutoHidePhase::Visible {
                 controller.hide_deadline = Some(now + Duration::from_millis(AUTO_HIDE_DELAY_MS));
-            } else if matches!(controller.phase, AutoHidePhase::Hidden | AutoHidePhase::Hiding) {
+            } else if matches!(
+                controller.phase,
+                AutoHidePhase::Hidden | AutoHidePhase::Hiding
+            ) {
                 controller.hovering = false;
                 begin_transition(&mut controller, AutoHidePhase::Revealing, position.y);
             }
         }
-        let over_window = point_in_rect(cursor.0, cursor.1, position.x, position.y, size.width, size.height);
+        let over_window = point_in_rect(
+            cursor.0,
+            cursor.1,
+            position.x,
+            position.y,
+            size.width,
+            size.height,
+        );
         match controller.phase {
             AutoHidePhase::Hidden if in_trigger => {
                 controller.hovering = false;
@@ -391,7 +473,12 @@ fn advance_auto_hide(
                 begin_transition(&mut controller, AutoHidePhase::Revealing, position.y);
             }
             AutoHidePhase::Visible => {
-                if over_window {
+                if gate.voice_active.load(Ordering::Relaxed)
+                    || gate.wake_conversation_active.load(Ordering::Relaxed)
+                {
+                    controller.hovering = false;
+                    controller.hide_deadline = None;
+                } else if over_window {
                     controller.hovering = true;
                     controller.hide_deadline = None;
                 } else {
@@ -400,7 +487,10 @@ fn advance_auto_hide(
                         controller.hide_deadline =
                             Some(now + Duration::from_millis(AUTO_HIDE_DELAY_MS));
                     }
-                    if controller.hide_deadline.is_some_and(|deadline| now >= deadline) {
+                    if controller
+                        .hide_deadline
+                        .is_some_and(|deadline| now >= deadline)
+                    {
                         begin_transition(&mut controller, AutoHidePhase::Hiding, position.y);
                     }
                 }
@@ -415,14 +505,22 @@ fn advance_auto_hide(
         let progress = (elapsed / ANIMATION_MS as f64).clamp(0.0, 1.0);
         let revealing = controller.phase == AutoHidePhase::Revealing;
         let target_y = if revealing { visible_y } else { hidden_y };
-        let eased = if revealing { 1.0 - (1.0 - progress).powi(2) } else { progress.powi(2) };
+        let eased = if revealing {
+            1.0 - (1.0 - progress).powi(2)
+        } else {
+            progress.powi(2)
+        };
         let y = (controller.animation_from_y as f64
             + (target_y - controller.animation_from_y) as f64 * eased)
             .round() as i32;
         let _ = win.set_position(PhysicalPosition::new(position.x, y));
         if progress >= 1.0 {
             let _ = win.set_position(PhysicalPosition::new(position.x, target_y));
-            target_phase = Some(if revealing { AutoHidePhase::Visible } else { AutoHidePhase::Hidden });
+            target_phase = Some(if revealing {
+                AutoHidePhase::Visible
+            } else {
+                AutoHidePhase::Hidden
+            });
         }
     } else if controller.phase == AutoHidePhase::Hidden && position.y != hidden_y {
         let _ = win.set_position(PhysicalPosition::new(position.x, hidden_y));
@@ -448,7 +546,13 @@ fn current_screen_key(app: &AppHandle) -> Option<(i32, i32, u32, u32, u64)> {
     let m = target_monitor(app, &pref)?;
     let p = m.position();
     let size = m.size();
-    Some((p.x, p.y, size.width, size.height, m.scale_factor().to_bits()))
+    Some((
+        p.x,
+        p.y,
+        size.width,
+        size.height,
+        m.scale_factor().to_bits(),
+    ))
 }
 
 /// Polls Windows globally while auto-hide is enabled, or parks when the
@@ -501,9 +605,13 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                 }
 
                 let Some(win) = window(&app) else { break };
-                let Some((cx, cy)) = cursor_physical() else { continue };
+                let Some((cx, cy)) = cursor_physical() else {
+                    continue;
+                };
                 let native_hidden = advance_auto_hide(&app, &gate, &win, (cx, cy), Instant::now());
-                let Ok(origin) = win.outer_position() else { continue };
+                let Ok(origin) = win.outer_position() else {
+                    continue;
+                };
                 let scale = win.scale_factor().unwrap_or(1.0);
                 let x = (cx - origin.x as f64) / scale;
                 let y = (cy - origin.y as f64) / scale;
@@ -518,7 +626,8 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                 let down = left_button_down();
                 if down && !was_down {
                     let handle = app.clone();
-                    let _ = app.run_on_main_thread(move || platform::unblock_webview_drops(&handle));
+                    let _ =
+                        app.run_on_main_thread(move || platform::unblock_webview_drops(&handle));
                 }
                 was_down = down;
 
@@ -546,11 +655,7 @@ pub fn spawn_cursor_poll(app: AppHandle, gate: Arc<PollGate>) {
                 // the mouse, which also makes the drop zone as forgiving as the Mac's.
                 // A press may be the start of a drag: make sure the drop target is
                 // ours before the file arrives.
-                let dragging = down
-                    && x >= 0.0
-                    && x <= size.0
-                    && y >= 0.0
-                    && y <= size.1;
+                let dragging = down && x >= 0.0 && x <= size.0 && y >= 0.0 && y <= size.1;
 
                 let accept = !native_hidden && (on_island || dragging);
                 if gate.ignoring.load(Ordering::Relaxed) == accept {
@@ -603,5 +708,38 @@ pub fn refresh_click_through(app: &AppHandle, gate: &PollGate) {
 pub fn set_ignore_cursor(app: &AppHandle, ignore: bool) {
     if let Some(win) = window(app) {
         let _ = win.set_ignore_cursor_events(ignore);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{prepare_launch_visibility, AutoHidePhase, PollGate, LAUNCH_VISIBLE_MS};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn launch_visibility_starts_visible_with_ten_second_autohide_deadline() {
+        let gate = PollGate::new(true);
+        prepare_launch_visibility(&gate);
+        let after = Instant::now();
+
+        let controller = gate.auto_hide.lock().unwrap();
+        assert_eq!(controller.phase, AutoHidePhase::Visible);
+        let deadline = controller
+            .hide_deadline
+            .expect("launch should schedule auto-hide");
+        let remaining = deadline.saturating_duration_since(after);
+        assert!(remaining <= Duration::from_millis(LAUNCH_VISIBLE_MS));
+        assert!(remaining > Duration::from_millis(LAUNCH_VISIBLE_MS - 100));
+    }
+
+    #[test]
+    fn launch_visibility_keeps_auto_hide_disabled_behavior() {
+        let gate = PollGate::new(false);
+
+        prepare_launch_visibility(&gate);
+
+        let controller = gate.auto_hide.lock().unwrap();
+        assert_eq!(controller.phase, AutoHidePhase::Visible);
+        assert!(controller.hide_deadline.is_none());
     }
 }
