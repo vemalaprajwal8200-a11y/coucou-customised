@@ -24,6 +24,7 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_AUDIO_BYTES
 model = WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE_TYPE)
 
+
 def decode_audio(path):
     resampler = av.audio.resampler.AudioResampler(
         format="s16",
@@ -62,13 +63,31 @@ def transcribe():
     if audio is None or not audio.filename:
         return jsonify({"error": "An audio file is required."}), 400
 
+    # Optional wake-word hint sent by the frontend (e.g. "Hey Macha").
+    # Passing it as Whisper's initial_prompt biases the model toward the
+    # expected phrase, which cuts mis-transcriptions and reduces latency.
+    wake_hint = request.form.get("wake_hint", "").strip()
+    initial_prompt = wake_hint if wake_hint else None
+
     temp_path = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=Path(audio.filename).suffix or ".webm", delete=False) as temp:
+        with tempfile.NamedTemporaryFile(
+            suffix=Path(audio.filename).suffix or ".webm", delete=False
+        ) as temp:
             temp_path = Path(temp.name)
             audio.save(temp)
+
+        try:
+            audio_data = decode_audio(temp_path)
+        except Exception:
+            app.logger.exception("Audio decode failed")
+            return jsonify({"error": "Could not decode the audio file."}), 400
+
+        if audio_data.size == 0:
+            return jsonify({"text": "", "confidence": -100.0})
+
         segments, _ = model.transcribe(
-            decode_audio(temp_path),
+            audio_data,
             beam_size=BEAM_SIZE,
             temperature=0,
             vad_filter=VAD_FILTER,
@@ -76,6 +95,7 @@ def transcribe():
             language=TRANSCRIPTION_LANGUAGE,
             condition_on_previous_text=False,
             without_timestamps=True,
+            initial_prompt=initial_prompt,
         )
         segments = list(segments)
         text = " ".join(segment.text.strip() for segment in segments).strip()

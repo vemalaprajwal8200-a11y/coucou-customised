@@ -72,6 +72,7 @@ async function main() {
   window.addEventListener("coucou-wake-word-complete", () => {
     State.isPinned = false;
     island.dropPin();
+    island.fsm.forceHidden();
     void Bridge.setWakeConversationActive(false).catch((error: unknown) => {
       console.error("[coucou] could not release the wake conversation visibility hold", error);
     });

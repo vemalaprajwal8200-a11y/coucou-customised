@@ -11,8 +11,11 @@ use crate::secrets;
 const OLLAMA_BASE: &str = "http://127.0.0.1:11434";
 const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
 const OPENROUTER_MAX_TOKENS: u32 = 1024;
+const VOICE_OLLAMA_MAX_TOKENS: u32 = 256;
+const VOICE_OPENROUTER_MAX_TOKENS: u32 = 256;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-const VOICE_OPENROUTER_TIMEOUT: Duration = Duration::from_secs(15);
+const VOICE_OPENROUTER_TIMEOUT: Duration = Duration::from_secs(8);
+const VOICE_OLLAMA_TIMEOUT: Duration = Duration::from_secs(10);
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(1500);
 const HEALTH_CACHE_AGE: Duration = Duration::from_secs(15);
 const OLLAMA_START_WAIT: Duration = Duration::from_secs(5);
@@ -94,53 +97,57 @@ pub async fn chat(
 ) -> Result<ChatReply, String> {
     let mode = ProviderMode::parse(mode);
     if mode == ProviderMode::VoiceAuto {
-        let cloud_result = openrouter_completion_with_timeout(
+        let local_result = ollama_completion(
             messages.clone(),
             tools.clone(),
-            openrouter_model,
+            ollama_model,
+            false,
             cancel,
-            VOICE_OPENROUTER_TIMEOUT,
+            Some(VOICE_OLLAMA_TIMEOUT),
+            Some(VOICE_OLLAMA_MAX_TOKENS),
         )
         .await;
-        match cloud_result {
-            Ok((response, actual_model)) => {
-                crate::log::line(format!(
-                    "voice chat provider=openrouter model={actual_model}"
-                ));
+        match local_result {
+            Ok(response) => {
+                crate::log::line(format!("voice chat provider=ollama model={ollama_model}"));
                 return Ok(ChatReply {
                     response,
-                    provider: "openrouter".into(),
-                    model: actual_model,
+                    provider: "ollama".into(),
+                    model: ollama_model.into(),
                     fallback_notice: None,
                 });
             }
-            Err(error) if error == "Request cancelled." => return Err(error),
-            Err(cloud_error) => {
+            Err(error) if error.message == "Request cancelled." => return Err(error.message),
+            Err(local_error) => {
                 crate::log::line(format!(
-                    "voice chat OpenRouter unavailable; trying Ollama: {cloud_error}"
+                    "voice chat Ollama unavailable; trying OpenRouter: {}",
+                    local_error.message
                 ));
-                return match ollama_completion(messages, tools, ollama_model, true, cancel).await {
-                    Ok(response) => {
-                        crate::log::line(format!(
-                            "voice chat provider=ollama model={ollama_model} fallback=true"
-                        ));
-                        Ok(ChatReply {
-                            response,
-                            provider: "ollama".into(),
-                            model: ollama_model.into(),
-                            fallback_notice: Some("Using Ollama (OpenRouter unavailable)".into()),
-                        })
-                    }
-                    Err(local_error) if local_error.message == "Request cancelled." => {
-                        Err(local_error.message)
-                    }
-                    Err(local_error) => Err(format!(
-                        "OpenRouter failed: {cloud_error}. Ollama failed: {}",
-                        local_error.message
-                    )),
-                };
             }
         }
+        return match openrouter_completion_with_timeout(
+            messages,
+            tools,
+            openrouter_model,
+            cancel,
+            VOICE_OPENROUTER_TIMEOUT,
+            VOICE_OPENROUTER_MAX_TOKENS,
+        )
+        .await
+        {
+            Ok((response, actual_model)) => {
+                crate::log::line(format!(
+                    "voice chat provider=openrouter model={actual_model} fallback=true"
+                ));
+                Ok(ChatReply {
+                    response,
+                    provider: "openrouter".into(),
+                    model: actual_model,
+                    fallback_notice: Some("Using OpenRouter (Ollama unavailable)".into()),
+                })
+            }
+            Err(cloud_error) => Err(cloud_error),
+        };
     }
 
     if mode != ProviderMode::OpenRouterOnly {
@@ -150,6 +157,8 @@ pub async fn chat(
             ollama_model,
             mode == ProviderMode::OllamaOnly,
             cancel,
+            None,
+            None,
         )
         .await;
         match ollama_result {
@@ -206,6 +215,8 @@ async fn ollama_completion(
     model: &str,
     wait_for_start: bool,
     cancel: &mut watch::Receiver<bool>,
+    response_timeout: Option<Duration>,
+    max_tokens: Option<u32>,
 ) -> Result<Value, ProviderError> {
     let status = if wait_for_start {
         ensure_ollama().await
@@ -226,13 +237,15 @@ async fn ollama_completion(
             true,
         ));
     }
-    let timeout = if model == "qwen2.5:7b" {
-        Duration::from_secs(60)
-    } else {
-        Duration::from_secs(120)
-    };
+    let timeout = response_timeout.unwrap_or_else(|| {
+        if model == "qwen2.5:7b" {
+            Duration::from_secs(60)
+        } else {
+            Duration::from_secs(120)
+        }
+    });
     let client = client(timeout).map_err(|error| ProviderError::local(error, true))?;
-    let body = request_body(model, messages, tools, None, true);
+    let body = request_body(model, messages, tools, max_tokens, true);
     send_json(
         &client,
         format!("{OLLAMA_BASE}/v1/chat/completions"),
@@ -250,8 +263,15 @@ async fn openrouter_completion(
     model: &str,
     cancel: &mut watch::Receiver<bool>,
 ) -> Result<(Value, String), String> {
-    openrouter_completion_with_timeout(messages, tools, model, cancel, Duration::from_secs(60))
-        .await
+    openrouter_completion_with_timeout(
+        messages,
+        tools,
+        model,
+        cancel,
+        Duration::from_secs(60),
+        OPENROUTER_MAX_TOKENS,
+    )
+    .await
 }
 
 async fn openrouter_completion_with_timeout(
@@ -260,6 +280,7 @@ async fn openrouter_completion_with_timeout(
     model: &str,
     cancel: &mut watch::Receiver<bool>,
     response_timeout: Duration,
+    max_tokens: u32,
 ) -> Result<(Value, String), String> {
     let mut accounts = secrets::openrouter_accounts()?;
     if accounts.is_empty() {
@@ -280,7 +301,7 @@ async fn openrouter_completion_with_timeout(
             &openrouter_model(model),
             messages.clone(),
             tools.clone(),
-            Some(OPENROUTER_MAX_TOKENS),
+            Some(max_tokens),
             false,
         );
         match send_openrouter_with_retry(&client, &key, body, cancel).await {

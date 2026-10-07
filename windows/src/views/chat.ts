@@ -13,8 +13,9 @@ import {
 } from "../core/bridge";
 import { Sound } from "../core/sound";
 import { State, type ChatMessage } from "../core/state";
+import { sanitizeAssistantText } from "../core/text";
 import * as TTS from "../core/tts";
-import { createWakeWordListener, extractWakeCommand, isWakeLeadOnly } from "../core/wakeWord";
+import { createWakeWordListener, extractWakeCommand } from "../core/wakeWord";
 import type { ViewHost } from "./views";
 
 let nextId = 1;
@@ -268,10 +269,9 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
   let lastWakePronunciation = State.settings.wakeWordPronunciation;
   let lastWakeThreshold = State.settings.wakeWordThreshold;
   let wakeCalibrationActive = false;
-  let pendingWakeLead: string | null = null;
-  let wakeLeadTimer: number | null = null;
   let suppressWakeRestart = false;
   let wakeAckInProgress = false;
+  let wakeFeedbackTimer: number | null = null;
   let actionConfirmationActive = false;
   let actionConfirmationProcessing = false;
   let actionConfirmationStage: "choose" | "confirm" = "confirm";
@@ -360,10 +360,9 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
 
   function stopWakeWord() {
     wakeWord.stop();
-    pendingWakeLead = null;
-    if (wakeLeadTimer !== null) {
-      window.clearTimeout(wakeLeadTimer);
-      wakeLeadTimer = null;
+    if (wakeFeedbackTimer !== null) {
+      window.clearTimeout(wakeFeedbackTimer);
+      wakeFeedbackTimer = null;
     }
   }
 
@@ -391,6 +390,19 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     wakeWordStarting = true;
     try {
       await wakeWord.start(
+        () => {
+          if (wakeFeedbackTimer !== null) window.clearTimeout(wakeFeedbackTimer);
+          holdWakeConversation();
+          setVoiceState("wake", 'Listening for "Hey Macha"…');
+          Sound.play("blip");
+          wakeFeedbackTimer = window.setTimeout(() => {
+            wakeFeedbackTimer = null;
+            if (voiceState === "wake") {
+              releaseWakeConversation();
+              setVoiceState("idle");
+            }
+          }, 10_000);
+        },
         (text) => void onWakeUtterance(text),
         (message) => {
           console.error("[coucou] Hey Macha wake-word listener error", message);
@@ -415,40 +427,25 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
   }
 
   async function onWakeUtterance(transcript: string) {
-    let wakeText = transcript;
-    if (pendingWakeLead) {
-      wakeText = `${pendingWakeLead} ${transcript}`;
-      pendingWakeLead = null;
-      if (wakeLeadTimer !== null) {
-        window.clearTimeout(wakeLeadTimer);
-        wakeLeadTimer = null;
-      }
-    } else if (isWakeLeadOnly(transcript, State.settings.wakeWordPronunciation)) {
-      pendingWakeLead = transcript.trim();
-      wakeLeadTimer = window.setTimeout(() => {
-        pendingWakeLead = null;
-        wakeLeadTimer = null;
-      }, 4_000);
-      return;
-    }
-
-    const command = extractWakeCommand(wakeText, State.settings.wakeWordPronunciation);
+    const command = extractWakeCommand(transcript, State.settings.wakeWordPronunciation);
     if (command === null) return;
 
+    if (wakeFeedbackTimer !== null) {
+      window.clearTimeout(wakeFeedbackTimer);
+      wakeFeedbackTimer = null;
+    }
     stopWakeWord();
     holdWakeConversation();
     suppressWakeRestart = true;
     wakeAckInProgress = true;
     Sound.play("blip");
     setVoiceState("listening", "Yes Boss — I'm listening.");
-    try {
-      await TTS.speak("Yes Boss");
-    } catch (error: unknown) {
+    const acknowledgement = TTS.speak("Yes Boss").catch((error: unknown) => {
       console.error("[coucou] could not speak wake-word acknowledgement", error);
-    } finally {
-      wakeAckInProgress = false;
-    }
+    });
+    void acknowledgement.then(() => { wakeAckInProgress = false; });
     if (!command) {
+      await acknowledgement;
       await startListening();
       return;
     }
@@ -458,7 +455,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       await Bridge.setVoiceActive(true);
       input.value = command;
       setVoiceState("transcribing", "Sending your message…");
-      await submit(command, true, wakeConversationHeld);
+      await submit(command, true, wakeConversationHeld, acknowledgement);
     } catch (error) {
       await releaseVoiceSession();
       setVoiceState(
@@ -503,7 +500,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     if (speaking) {
       stopWakeWord();
       if (wakeAckInProgress) {
-        setVoiceState("listening", "Yes Boss — I'm listening.");
+        if (voiceState !== "transcribing") setVoiceState("listening", "Yes Boss — I'm listening.");
       } else {
         setVoiceState("speaking", error ?? "", !!error);
       }
@@ -511,7 +508,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
         console.error("[coucou] could not hold island visible for speech", cause);
       });
     } else if (wakeAckInProgress) {
-      setVoiceState("listening", "Yes Boss — I'm listening.");
+      if (voiceState !== "transcribing") setVoiceState("listening", "Yes Boss — I'm listening.");
     } else if (voiceState === "speaking") {
       setVoiceState("idle", error ?? "", !!error);
       void Bridge.setVoiceActive(false).catch((cause: unknown) => {
@@ -608,6 +605,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     if (!actionConfirmationActive || !isOpenAction(pendingAction)) return;
     try {
       await wakeWord.start(
+        () => undefined,
         (text) => void onActionConfirmationTranscript(text),
         (message) => {
           console.error("[coucou] voice confirmation listener error", message);
@@ -975,7 +973,8 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     actionConfirmationActive = false;
     actionConfirmationProcessing = false;
     actionConfirmationStage = "confirm";
-    const content = reply.text || (reply.action
+    const safeReplyText = sanitizeAssistantText(reply.text);
+    const content = safeReplyText || (reply.action
       ? `Mochi is asking to ${actionDescription(reply.action)}.`
       : "");
     if (content) {
@@ -995,14 +994,14 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     if (acknowledgement) await acknowledgement;
     const shouldSpeak = State.settings.speakRepliesMode === "always"
       || (State.settings.speakRepliesMode === "voiceOnly" && voiceRequest);
-    if (shouldSpeak && reply.text.trim()) {
+    if (shouldSpeak && safeReplyText.trim()) {
       const assistantMessage = content
         ? State.chatHistory[State.chatHistory.length - 1]
         : undefined;
       if (assistantMessage?.role === "assistant") {
         assistantMessage.content = "";
         State.notify();
-        const speech = TTS.speak(reply.text);
+        const speech = TTS.speak(safeReplyText);
         await Promise.all([
           speech,
           revealReplyWhileSpeaking(assistantMessage, content, speech),
@@ -1012,7 +1011,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
         State.notify();
         onHeightChange();
       } else {
-        await TTS.speak(reply.text);
+        await TTS.speak(safeReplyText);
       }
     } else if (voiceRequest && !reply.action) {
       void releaseVoiceSession();

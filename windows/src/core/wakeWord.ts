@@ -1,13 +1,13 @@
 const STT_ENDPOINT = "http://127.0.0.1:5005/transcribe";
 const STT_HEALTH_ENDPOINT = "http://127.0.0.1:5005/health";
 const STT_TIMEOUT_MS = 15_000;
-const STT_STARTUP_TIMEOUT_MS = 5_000;
+const STT_STARTUP_TIMEOUT_MS = 20_000;
 const STT_STARTUP_RETRY_MS = 250;
 const DEFAULT_SPEECH_THRESHOLD = 0.006;
 const PRE_ROLL_MS = 280;
 const SILENCE_MS = 220;
-const WAKE_SILENCE_MS = 600;
-const MIN_SPEECH_MS = 120;
+const WAKE_SILENCE_MS = 250;
+const MIN_SPEECH_MS = 80;
 const MAX_SPEECH_MS = 12_000;
 const CALIBRATION_MS = 5000;
 const FILLER_WORDS = new Set(["um", "uh", "oh", "ah", "er", "okay", "ok", "so", "well"]);
@@ -87,6 +87,7 @@ export function isWakeLeadOnly(transcript: string, pronunciation = "Hey Macha"):
 
 export interface WakeWordListener {
   start(
+    onWakeActivity: () => void,
     onUtterance: (text: string) => void,
     onError: (message: string) => void,
     pronunciation: string,
@@ -287,8 +288,10 @@ export function createWakeWordListener(): WakeWordListener {
   let pronunciation = "Hey Macha";
   let useWakeHint = true;
   const pendingAudio: Array<{ audio: Blob; run: number }> = [];
+  let onWakeActivity: (() => void) | null = null;
   let onUtterance: ((text: string) => void) | null = null;
   let onError: ((message: string) => void) | null = null;
+  let wakeActivityReported = false;
 
   async function transcribePendingAudio() {
     if (requestRunning) return;
@@ -350,6 +353,7 @@ export function createWakeWordListener(): WakeWordListener {
     speechFrames = [];
     speechSilenceMs = 0;
     speechStartedAt = 0;
+    wakeActivityReported = false;
   }
 
   function enqueueUtterance(run: number, sampleRate: number, frames: Float32Array[], durationMs: number) {
@@ -393,6 +397,7 @@ export function createWakeWordListener(): WakeWordListener {
     activeRequest = null;
     requestRunning = false;
     request?.abort();
+    onWakeActivity = null;
     onUtterance = null;
     onError = null;
     if (processor) processor.onaudioprocess = null;
@@ -415,12 +420,13 @@ export function createWakeWordListener(): WakeWordListener {
   }
 
   return {
-    async start(onText, onFailure, wakePronunciation, speechThreshold, withWakeHint = true) {
+    async start(onActivity, onText, onFailure, wakePronunciation, speechThreshold, withWakeHint = true) {
       if (active) return;
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error("Always-listening microphone is not available in this window.");
       }
       await waitForSttReady();
+      onWakeActivity = onActivity;
       onUtterance = onText;
       onError = onFailure;
       pronunciation = wakePronunciation || "Hey Macha";
@@ -460,10 +466,24 @@ export function createWakeWordListener(): WakeWordListener {
         active = true;
         processor.onaudioprocess = (event) => {
           if (!active || generation !== run) return;
-          if (useWakeHint && (wakeWindowSent || requestRunning)) return;
           const samples = event.inputBuffer.getChannelData(0);
           const copy = new Float32Array(samples);
           const frameMs = copy.length * 1000 / context!.sampleRate;
+
+          // While a wake-hint request is in flight or the wake window has already
+          // been submitted, keep the pre-roll buffer fresh so the *next* utterance
+          // starts with proper context, but do not start accumulating speech frames.
+          if (useWakeHint && (wakeWindowSent || requestRunning)) {
+            if (!speechStartedAt) {
+              preRollFrames.push(copy);
+              preRollSamples += copy.length;
+              while (preRollSamples > preRollLimit && preRollFrames.length) {
+                preRollSamples -= preRollFrames.shift()!.length;
+              }
+            }
+            return;
+          }
+
           const speaking = streamRms(copy) >= threshold;
           if (speaking) {
             if (!speechStartedAt) {
@@ -471,6 +491,10 @@ export function createWakeWordListener(): WakeWordListener {
               speechFrames = preRollFrames;
               preRollFrames = [];
               preRollSamples = 0;
+              if (!wakeActivityReported) {
+                wakeActivityReported = true;
+                onWakeActivity?.();
+              }
             }
             speechFrames.push(copy);
             speechSilenceMs = 0;
