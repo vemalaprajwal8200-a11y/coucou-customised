@@ -469,19 +469,15 @@ interface IntegrationDef {
 }
 
 const INTEGRATIONS: IntegrationDef[] = [
+  { id: "integration_messages", name: "Messages", color: "#22C55E", fields: [] },
+  { id: "integration_spotify", name: "Spotify", color: "#1DB954",
+    fields: [{ key: "spotify-client-id", label: "Client ID", placeholder: "Spotify app Client ID", secret: false }] },
   { id: "integration_stripe", name: "Stripe", color: "#0570DE",
     fields: [{ key: "stripe-api-key", label: "Secret key", placeholder: "sk_live_…", secret: true }] },
   { id: "integration_github", name: "GitHub", color: "#F4505E",
     fields: [{ key: "github-token", label: "Token", placeholder: "ghp_…", secret: true }] },
   { id: "integration_vercel", name: "Vercel", color: "#7C5CFF",
     fields: [{ key: "vercel-token", label: "Token", placeholder: "…", secret: true }] },
-  { id: "integration_n8n", name: "n8n", color: "#F29B38",
-    fields: [
-      { key: "n8n-url", label: "Instance URL", placeholder: "https://n8n.example.com", secret: false },
-      { key: "n8n-api-key", label: "API key", placeholder: "…", secret: true },
-    ] },
-  { id: "integration_resend", name: "Resend", color: "#22C55E",
-    fields: [{ key: "resend-api-key", label: "API key", placeholder: "re_…", secret: true }] },
   { id: "integration_notion", name: "Notion", color: "#8C8C8C",
     fields: [{ key: "notion-api-key", label: "Integration token", placeholder: "ntn_…", secret: true }] },
   { id: "integration_calcom", name: "Cal.com", color: "#C9956A",
@@ -496,7 +492,7 @@ function integrationsSection(present: Record<string, boolean>): HTMLElement {
 
   function updateNote() {
     const used = settings.activeIntegrations.length;
-    note.textContent = `Pick up to ${MAX_ACTIVE} pills to show next to Mochi — ${used}/${MAX_ACTIVE} in use. Keys are stored in the Windows Credential Manager, never on disk.`;
+    note.textContent = `Pick up to ${MAX_ACTIVE} pills to show next to Macha — ${used}/${MAX_ACTIVE} in use. Keys are stored in the Windows Credential Manager, never on disk.`;
   }
 
   for (const def of INTEGRATIONS) {
@@ -516,6 +512,56 @@ function integrationsSection(present: Record<string, boolean>): HTMLElement {
     });
 
     const rows = h("div", { style: "display:flex;flex-direction:column;gap:6px;flex:1 1 auto;min-width:0" });
+    if (def.id === "integration_messages") {
+      const enable = h("button", { text: "Allow Windows notifications" });
+      enable.addEventListener("click", async () => {
+        try {
+          await Bridge.requestMessageAccess();
+          enable.textContent = (await Bridge.messageAccessStatus())
+            ? "Notification access enabled"
+            : "Windows did not grant notification access";
+        } catch (error) {
+          enable.textContent = String(error).replace(/^Error:\s*/, "");
+        }
+      });
+      rows.append(
+        enable,
+        h("div", {
+          class: "hint",
+          text: "Coucou shows notifications from all apps here. Turn off notification banners for individual apps in Windows Settings to avoid duplicate pop-ups.",
+        }),
+      );
+    }
+    if (def.id === "integration_spotify") {
+      const connect = h("button", { text: "Connect Spotify" });
+      connect.addEventListener("click", async () => {
+        try {
+          await Bridge.openUrlStrict(await Bridge.spotifyConnect());
+          connect.textContent = "Complete sign-in in your browser";
+        } catch (error) {
+          connect.textContent = String(error).replace(/^Error:\s*/, "");
+        }
+      });
+      const disconnect = h("button", {
+        text: "Disconnect Spotify",
+        onclick: async () => {
+          try {
+            await Bridge.spotifyDisconnect();
+            disconnect.textContent = "Spotify disconnected";
+          } catch (error) {
+            disconnect.textContent = String(error).replace(/^Error:\s*/, "");
+          }
+        },
+      });
+      rows.append(
+        connect,
+        disconnect,
+        h("div", {
+          class: "hint",
+          text: "In your Spotify Developer app, add this redirect URI exactly: http://127.0.0.1:43821/callback. Playback control may require Spotify Premium.",
+        }),
+      );
+    }
     for (const field of def.fields) {
       const input = h("input", {
         type: field.secret ? "password" : "text",
@@ -781,7 +827,7 @@ function automationSection(): HTMLElement {
     if (settings.automationFolders.length === 0) {
       list.append(h("div", {
         class: "hint",
-        text: "No folders are authorized. Mochi cannot inspect or change local files until you add one.",
+        text: "No folders are authorized. Macha cannot inspect or change local files until you add one.",
       }));
       return;
     }
@@ -841,7 +887,7 @@ function automationSection(): HTMLElement {
     h("h2", {}, h("span", { text: "Local automation" })),
     h("div", {
       class: "hint",
-      text: "Mochi can open installed apps and work with files only inside these folders. Each action needs your approval. File edits show a preview and create a backup first. Deleting files and running commands are not available. Files you ask Mochi to read are sent to the selected chat provider.",
+      text: "Macha can open installed apps and work with files only inside these folders. Each action needs your approval. File edits show a preview and create a backup first. Deleting files and running commands are not available. Files you ask Macha to read are sent to the selected chat provider.",
     }),
     list,
     h("div", { class: "row" }, add),
@@ -878,7 +924,7 @@ async function main() {
 
   const keys = [
     "stripe-api-key", "github-token", "vercel-token",
-    "n8n-url", "n8n-api-key", "resend-api-key", "notion-api-key", "calcom-api-key",
+    "spotify-client-id", "notion-api-key", "calcom-api-key",
   ];
   const present: Record<string, boolean> = {};
   for (const k of keys) present[k] = (await Bridge.secretPresent(k)) ?? false;

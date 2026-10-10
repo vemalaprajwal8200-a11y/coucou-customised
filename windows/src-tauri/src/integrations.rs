@@ -62,17 +62,15 @@ pub fn set_paused(on: bool) {
 
 /// Spawns every poller with the macOS delays and intervals.
 pub fn start(app: AppHandle) {
-    spawn(app.clone(), "integration_n8n", 3, 15, poll_n8n);
     spawn(app.clone(), "integration_vercel", 5, 30, poll_vercel);
     spawn(app.clone(), "integration_stripe", 6, 30, poll_stripe);
-    spawn(app.clone(), "integration_resend", 6, 60, poll_resend);
     spawn(app.clone(), "integration_github", 7, 300, poll_github);
     spawn(app.clone(), "integration_calcom", 8, 300, poll_calcom);
     spawn(app, "integration_notion", 9, 300, poll_notion);
 }
 
 /// True when the user has this integration switched on in settings.
-fn enabled(app: &AppHandle, id: &str) -> bool {
+pub(crate) fn enabled(app: &AppHandle, id: &str) -> bool {
     app.try_state::<crate::Shared>()
         .map(|shared| {
             let settings = shared.settings.lock().unwrap();
@@ -109,8 +107,6 @@ pub async fn poll_once(app: AppHandle, id: &str) {
         "integration_stripe" => poll_stripe(app).await,
         "integration_github" => poll_github(app).await,
         "integration_vercel" => poll_vercel(app).await,
-        "integration_n8n" => poll_n8n(app).await,
-        "integration_resend" => poll_resend(app).await,
         "integration_notion" => poll_notion(app).await,
         "integration_calcom" => poll_calcom(app).await,
         _ => {}

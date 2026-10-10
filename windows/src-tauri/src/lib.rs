@@ -8,10 +8,12 @@ mod integrations;
 mod island;
 mod llm_client;
 mod log;
+mod messages;
 mod pipe;
 mod platform;
 mod secrets;
 mod settings;
+mod spotify;
 mod tray;
 mod voice;
 
@@ -161,11 +163,11 @@ fn reposition(app: AppHandle, shared: State<Shared>) {
 }
 
 #[tauri::command]
-fn open_url(url: String) {
+fn open_url(url: String) -> Result<(), String> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return;
+        return Err("Only HTTP and HTTPS links can be opened.".into());
     }
-    platform::open_url(&url);
+    platform::open_url(&url)
 }
 
 /// "Open terminal" opens the working folder in VS Code when `code` is on PATH,
@@ -437,18 +439,14 @@ fn openrouter_account_reveal(id: String) -> Result<String, String> {
     secrets::reveal_openrouter_key(&id)
 }
 
-/// Opens the configured n8n instance — the URL lives in the Credential Manager.
-#[tauri::command]
-fn open_n8n() {
-    if let Some(url) = secrets::get("n8n-url") {
-        open_url(url);
-    }
-}
-
 /// Refresh buttons in the integration cards.
 #[tauri::command]
 async fn refresh_integration(app: AppHandle, id: String) {
-    integrations::poll_once(app, &id).await;
+    if id == "integration_spotify" {
+        spotify::poll_once(app).await;
+    } else {
+        integrations::poll_once(app, &id).await;
+    }
 }
 
 /// Lets the island write to the same log as the Rust side.
@@ -598,13 +596,23 @@ pub fn run() {
             openrouter_account_remove,
             openrouter_account_reveal,
             refresh_integration,
-            open_n8n,
+            messages::request_message_access,
+            messages::message_access_status,
+            messages::open_message_source,
+            spotify::spotify_connect,
+            spotify::spotify_control,
+            spotify::spotify_disconnect,
             open_settings_window,
             set_paused,
             toggle_auto_hide,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
+            if loaded.autostart {
+                if let Err(error) = app.autolaunch().enable() {
+                    eprintln!("[coucou] autostart: {error}");
+                }
+            }
             tray::build(&handle)?;
             if let Ok(shortcut) = HOTKEY.parse::<Shortcut>() {
                 if let Err(error) = app.global_shortcut().register(shortcut) {
@@ -643,6 +651,8 @@ pub fn run() {
             hooks::ensure_hook_exe(&handle);
             pipe::start(handle.clone());
             integrations::start(handle.clone());
+            messages::start(handle.clone());
+            spotify::start(handle.clone());
             Ok(())
         })
         .build(tauri::generate_context!())

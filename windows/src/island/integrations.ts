@@ -2,7 +2,13 @@
 // pollers: a genuinely new item flips the pill to finished/error, badges it when
 // the pill isn't focused, plays a sound, and clears itself after 60 s.
 
-import { onEvent, Bridge, type IntegrationUpdate } from "../core/bridge";
+import {
+  onEvent,
+  Bridge,
+  type IntegrationUpdate,
+  type MessageNotification,
+  type SpotifySnapshot,
+} from "../core/bridge";
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
 import type { Island } from "./island";
@@ -12,8 +18,7 @@ const KEY_FOR: Record<string, string> = {
   integration_stripe: "stripe-api-key",
   integration_github: "github-token",
   integration_vercel: "vercel-token",
-  integration_n8n: "n8n-api-key",
-  integration_resend: "resend-api-key",
+  integration_spotify: "spotify-client-id",
   integration_notion: "notion-api-key",
   integration_calcom: "calcom-api-key",
 };
@@ -22,6 +27,52 @@ const clearTimers = new Map<string, number>();
 
 export function registerIntegrationHandlers(island: Island) {
   void onEvent<IntegrationUpdate>("integration", (update) => handle(island, update));
+  void onEvent<MessageNotification>("message-notification", (notification) => {
+    if (State.paused) return;
+    const previous = State.integrations.integration_messages;
+    const queued = Array.isArray(previous?.data.notifications)
+      ? previous.data.notifications.filter((item): item is MessageNotification =>
+        typeof item === "object" && item !== null
+        && "id" in item && typeof item.id === "string"
+        && "appName" in item && typeof item.appName === "string"
+        && "title" in item && typeof item.title === "string"
+        && "body" in item && typeof item.body === "string")
+      : [];
+    if (!queued.some((item) => item.id === notification.id)) queued.push(notification);
+    State.integrations.integration_messages = {
+      data: { ...(previous?.data ?? {}), notification: queued[0], notifications: queued },
+      error: null,
+      loaded: true,
+      configured: true,
+    };
+    island.showMessageNotification();
+  });
+  void onEvent<string>("message-access-error", (message) => {
+    const previous = State.integrations.integration_messages;
+    State.integrations.integration_messages = {
+      ...(previous ?? { data: {}, loaded: false, configured: false }),
+      error: message,
+    };
+    State.notify();
+  });
+  void onEvent<SpotifySnapshot>("spotify-update", (snapshot) => {
+    const previous = State.integrations.integration_spotify;
+    State.integrations.integration_spotify = {
+      data: { ...snapshot },
+      error: null,
+      loaded: true,
+      configured: previous?.configured ?? true,
+    };
+    State.notify();
+  });
+  void onEvent<string>("spotify-error", (message) => {
+    const previous = State.integrations.integration_spotify;
+    State.integrations.integration_spotify = {
+      ...(previous ?? { data: {}, loaded: false, configured: false }),
+      error: message,
+    };
+    State.notify();
+  });
   void refreshConfigured();
 }
 
@@ -32,6 +83,14 @@ export async function refreshConfigured() {
     const info = State.integrations[id] ?? { data: {}, error: null, loaded: false, configured: false };
     State.integrations[id] = { ...info, configured: present };
   }
+  const notificationAccess = await Bridge.messageAccessStatus();
+  const messages = State.integrations.integration_messages;
+  State.integrations.integration_messages = {
+    data: messages?.data ?? {},
+    error: null,
+    loaded: notificationAccess ?? false,
+    configured: notificationAccess ?? false,
+  };
   const hooks = State.settings.hooksInstalled;
   const claude = State.integrations.integration_claude ?? {
     data: {}, error: null, loaded: false, configured: false,

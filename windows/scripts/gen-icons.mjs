@@ -186,6 +186,9 @@ const png = (size) => encodePNG(size, renderMochi(size));
 
 const files = {
   "32x32.png": png(32),
+  "44x44.png": png(44),
+  "50x50.png": png(50),
+  "150x150.png": png(150),
   "128x128.png": png(128),
   "128x128@2x.png": png(256),
   "icon.png": png(512),

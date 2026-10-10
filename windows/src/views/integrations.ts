@@ -7,7 +7,12 @@
 import { h, svg, clear, dot } from "./dom";
 import { ICONS } from "./icons";
 import { State, type AgentTask } from "../core/state";
-import { Bridge } from "../core/bridge";
+import {
+  Bridge,
+  type MessageNotification,
+  type SpotifySnapshot,
+  type SpotifyTrack,
+} from "../core/bridge";
 
 /** Same shape as the Swift `timeAgo` computed properties. */
 export function timeAgo(value: unknown): string {
@@ -45,7 +50,6 @@ function arr(id: string, key: string): Record<string, unknown>[] {
 // ── Not configured / idle ─────────────────────────────────────────────────────
 
 const OPEN_URLS: Record<string, string> = {
-  integration_resend: "https://resend.com/emails",
   integration_vercel: "https://vercel.com/dashboard",
   integration_github: "https://github.com",
   integration_stripe: "https://dashboard.stripe.com/payments",
@@ -71,15 +75,6 @@ function idleCard(task: AgentTask, openSettings: () => void): HTMLElement {
         style: `color:${task.color}b3`,
         text: "Open Visual Studio Code",
         onclick: () => void Bridge.openInVSCode(task.sessionCwd ?? null),
-      }),
-    );
-  } else if (task.id === "integration_n8n") {
-    actions.append(
-      h("button", {
-        class: "link-btn",
-        style: `color:${task.color}d9`,
-        text: "Open n8n",
-        onclick: () => void Bridge.openN8n(),
       }),
     );
   } else if (OPEN_URLS[task.id]) {
@@ -172,31 +167,6 @@ function vercelDetail(onBack: () => void): HTMLElement {
     ),
     body,
   );
-}
-
-// ── Resend ────────────────────────────────────────────────────────────────────
-
-function resendCard(): HTMLElement {
-  const emails = arr("integration_resend", "emails");
-  const total = get("integration_resend").total;
-  const extra =
-    total != null
-      ? h("span", { class: "int-total" }, h("i", { class: "pulse" }), h("span", { text: String(total) }))
-      : undefined;
-  const rows = h("div", { class: "int-rows" });
-  emails.slice(0, 3).forEach((e, i) => {
-    const delivered = e.lastEvent === "delivered";
-    const accent = delivered ? "#22C55E" : "#F4505E";
-    const to = Array.isArray(e.to) ? String(e.to[0] ?? "?") : "?";
-    const short = to.split("@")[0];
-    const cells: Node[] = [
-      h("span", { class: "int-name", text: short }),
-      h("span", { class: "int-ago", text: timeAgo(e.createdAt) }),
-    ];
-    if (i === 0 && e.subject) cells.push(h("span", { class: "int-sub", text: String(e.subject) }));
-    rows.append(listRow(accent, i === 0, ...cells));
-  });
-  return h("div", { class: "int-card" }, header("#22C55E", "Resend", "Emails", extra), rows);
 }
 
 // ── GitHub ────────────────────────────────────────────────────────────────────
@@ -315,63 +285,6 @@ function calcomCard(): HTMLElement {
   return h("div", { class: "int-card" }, header("#C9956A", "Cal.com", "Schedule"), rows);
 }
 
-// ── n8n ───────────────────────────────────────────────────────────────────────
-
-function n8nCard(task: AgentTask, onDetail: () => void, openSettings: () => void): HTMLElement {
-  const hasActivity = task.steps.length > 0 && (task.state === "finished" || task.state === "error");
-  if (!hasActivity) return idleCard(task, openSettings);
-  const success = task.state === "finished";
-  const accent = success ? "#22C55E" : "#F4505E";
-  return h(
-    "div",
-    { class: "int-card" },
-    header("#F29B38", "n8n", "Workflow"),
-    h(
-      "div",
-      { class: "int-actions" },
-      h(
-        "button",
-        {
-          class: "int-pill",
-          style: `background:${accent}1a;border-color:${accent}38`,
-          onclick: onDetail,
-        },
-        dot(accent, 5),
-        h("span", { class: "int-name", text: task.steps[0] ?? "Workflow" }),
-        svg(ICONS.ellipsis, 8),
-      ),
-    ),
-  );
-}
-
-function n8nDetail(task: AgentTask, onBack: () => void): HTMLElement {
-  const success = task.state === "finished";
-  const accent = success ? "#22C55E" : "#F4505E";
-  const detail = task.steps[1];
-  return h(
-    "div",
-    { class: "int-card detail" },
-    h(
-      "div",
-      { class: "int-detail-head" },
-      h("button", { class: "int-back", onclick: onBack }, svg(ICONS.chevronLeft, 10, { stroke: 2.4 })),
-      dot(accent, 6),
-      h("b", { text: task.steps[0] ?? "Workflow" }),
-      h("span", {
-        class: "int-badge",
-        style: `color:${accent};background:${accent}24`,
-        text: success ? "Success" : "Failed",
-      }),
-    ),
-    detail
-      ? h("pre", { class: "int-detail-text", text: detail })
-      : h("div", {
-          class: "int-status",
-          text: success ? "Completed successfully." : "No error details available.",
-        }),
-  );
-}
-
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
 export interface IntegrationCardHooks {
@@ -388,8 +301,9 @@ export function hasIntegrationData(id: string): boolean {
   switch (id) {
     case "integration_vercel":
       return arr(id, "deployments").length > 0;
-    case "integration_resend":
-      return arr(id, "emails").length > 0;
+    case "integration_messages":
+    case "integration_spotify":
+      return info.loaded;
     case "integration_github":
       return get(id).totalRepos != null;
     case "integration_stripe":
@@ -403,21 +317,287 @@ export function hasIntegrationData(id: string): boolean {
   }
 }
 
-export function renderIntegrationCard(task: AgentTask, hooks: IntegrationCardHooks): HTMLElement {
-  if (task.id === "integration_n8n") {
-    const hasActivity = task.steps.length > 0 && (task.state === "finished" || task.state === "error");
-    return hooks.detailOpen && hasActivity
-      ? n8nDetail(task, hooks.closeDetail)
-      : n8nCard(task, hooks.openDetail, hooks.openSettings);
+function messageNotification(): MessageNotification | null {
+  const data = get("integration_messages");
+  const value = Array.isArray(data.notifications) ? data.notifications[0] : data.notification;
+  if (typeof value !== "object" || value === null) return null;
+  if (!("id" in value) || typeof value.id !== "string"
+    || !("appName" in value) || typeof value.appName !== "string"
+    || !("title" in value) || typeof value.title !== "string"
+    || !("body" in value) || typeof value.body !== "string") return null;
+  return { id: value.id, appName: value.appName, title: value.title, body: value.body };
+}
+
+function spotifyTrack(value: unknown): SpotifyTrack | null {
+  if (typeof value !== "object" || value === null
+    || !("name" in value) || typeof value.name !== "string"
+    || !("artists" in value) || typeof value.artists !== "string"
+    || !("durationMs" in value) || typeof value.durationMs !== "number") return null;
+  return {
+    name: value.name,
+    artists: value.artists,
+    durationMs: value.durationMs,
+    imageUrl: "imageUrl" in value && typeof value.imageUrl === "string" ? value.imageUrl : null,
+    uri: "uri" in value && typeof value.uri === "string" ? value.uri : null,
+  };
+}
+
+function spotifySnapshot(): SpotifySnapshot {
+  const data = get("integration_spotify");
+  return {
+    connected: data.connected === true,
+    playing: data.playing === true,
+    progressMs: typeof data.progressMs === "number" ? data.progressMs : 0,
+    track: spotifyTrack(data.track),
+    queue: Array.isArray(data.queue)
+      ? data.queue.map(spotifyTrack).filter((track): track is SpotifyTrack => track !== null)
+      : [],
+  };
+}
+
+async function spotifyAction(
+  action: "play" | "pause" | "next" | "previous" | "seek" | "play_track",
+  positionMs?: number,
+  trackUri?: string,
+): Promise<void> {
+  try {
+    await Bridge.spotifyControl(action, positionMs, trackUri);
+    const info = State.integrations.integration_spotify;
+    if (info) info.error = null;
+    void Bridge.refreshIntegration("integration_spotify");
+  } catch (error) {
+    const info = State.integrations.integration_spotify;
+    if (info) info.error = String(error).replace(/^Error:\s*/, "");
+    console.error("[coucou] Spotify playback action failed", error);
   }
+  State.notify();
+}
+
+function messagesCard(openSettings: () => void): HTMLElement {
+  const message = messageNotification();
+  if (!message) {
+    return h(
+      "div",
+      { class: "int-card" },
+      header("#22C55E", "Messages", "Windows notifications"),
+      h("div", {
+        class: "int-status",
+        text: State.integrations.integration_messages?.error
+          ?? (State.integrations.integration_messages?.configured
+            ? "Waiting for notifications…"
+            : "Allow notification access in Settings."),
+      }),
+      h("div", { class: "int-actions" },
+        h("button", {
+          class: "link-btn",
+          text: "Notification settings",
+          onclick: openSettings,
+        }),
+      ),
+    );
+  }
+  return h(
+    "div",
+    { class: "int-card message-notification" },
+    header("#22C55E", "Messages", message.appName),
+    State.integrations.integration_messages?.error
+      ? h("div", { class: "int-status", text: State.integrations.integration_messages.error })
+      : null,
+    h("button", {
+      class: "message-notification-content",
+      title: "Open source app",
+      onclick: async () => {
+        try {
+          await Bridge.openMessageSource(message.id);
+        } catch (error) {
+          const info = State.integrations.integration_messages;
+          if (info) info.error = String(error).replace(/^Error:\s*/, "");
+          console.error("[coucou] could not open notification source", error);
+          State.notify();
+        }
+      },
+    },
+    h("b", { text: message.title || message.appName }),
+    h("span", { text: message.body }),
+    ),
+  );
+}
+
+function formatPlaybackTime(milliseconds: number): string {
+  const seconds = Math.floor(Math.max(0, milliseconds) / 1000);
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function spotifyIcon(path: string, size = 16): SVGSVGElement {
+  return svg(path, size, { stroke: 1.9 });
+}
+
+const SPOTIFY_ICONS = {
+  previous: "M6 5v14M18 6v12L8 12l10-6z",
+  play: "M8 5v14l11-7z",
+  pause: "M7 5h4v14H7zM15 5h4v14h-4z",
+  next: "M18 5v14M6 6v12l10-6L6 6z",
+  rowPlay: "M8 5v14l11-7z",
+};
+
+function spotifyCard(openSettings: () => void): HTMLElement {
+  const data = spotifySnapshot();
+  const error = State.integrations.integration_spotify?.error;
+  const track = data.track;
+  if (!track) {
+    return h(
+      "div",
+      { class: "int-card spotify-card" },
+      header("#1DB954", "Spotify", "Player"),
+      h("div", {
+        class: "int-status",
+        text: error ?? (data.connected
+          ? "Nothing is playing."
+          : "Connect Spotify to see playback."),
+      }),
+      h("div", { class: "int-actions" },
+        h("button", {
+          class: "link-btn",
+          text: data.connected ? "Refresh" : "Connect Spotify",
+          onclick: () => data.connected
+            ? void Bridge.refreshIntegration("integration_spotify")
+            : openSettings(),
+        }),
+      ),
+    );
+  }
+
+  const seek = h("input", {
+    class: "spotify-seek",
+    type: "range",
+    min: "0",
+    max: String(track.durationMs),
+    value: String(Math.min(data.progressMs, track.durationMs)),
+    "aria-label": "Track position",
+  }) as HTMLInputElement;
+  const updateSeekProgress = () => {
+    const progress = track.durationMs > 0
+      ? Math.min(100, (Number(seek.value) / track.durationMs) * 100)
+      : 0;
+    seek.style.setProperty("--spotify-progress", `${progress}%`);
+  };
+  updateSeekProgress();
+  seek.addEventListener("input", updateSeekProgress);
+  seek.addEventListener("change", () => {
+    void spotifyAction("seek", Number(seek.value));
+  });
+  const controls = h("div", { class: "spotify-controls" },
+    h("button", {
+      class: "spotify-skip",
+      type: "button",
+      title: "Previous track",
+      "aria-label": "Previous track",
+      onclick: () => void spotifyAction("previous"),
+    }, spotifyIcon(SPOTIFY_ICONS.previous)),
+    h("button", {
+      class: "spotify-toggle",
+      type: "button",
+      title: data.playing ? "Pause" : "Play",
+      "aria-label": data.playing ? "Pause" : "Play",
+      onclick: () => void spotifyAction(data.playing ? "pause" : "play"),
+    }, spotifyIcon(data.playing ? SPOTIFY_ICONS.pause : SPOTIFY_ICONS.play, 21)),
+    h("button", {
+      class: "spotify-skip",
+      type: "button",
+      title: "Next track",
+      "aria-label": "Next track",
+      onclick: () => void spotifyAction("next"),
+    }, spotifyIcon(SPOTIFY_ICONS.next)),
+  );
+
+  const queueRows = h("div", { class: "spotify-queue" });
+  const queueHeader = h("div", { class: "spotify-queue-header" },
+    h("b", { text: "Up next" }),
+    h("span", { text: `${data.queue.length} ${data.queue.length === 1 ? "track" : "tracks"}` }),
+  );
+  const queueList = h("div", { class: "spotify-queue-list" });
+  if (data.queue.length) {
+    data.queue.forEach((item, index) => {
+      const thumbnail = item.imageUrl
+        ? h("img", { class: "spotify-queue-artwork", src: item.imageUrl, alt: "" })
+        : h("span", { class: "spotify-queue-artwork spotify-queue-artwork-empty", "aria-hidden": "true" });
+      const numberBadge = h("span", { class: "spotify-queue-number", "aria-hidden": "true" },
+        h("span", { class: "spotify-queue-number-value", text: String(index + 1) }),
+        spotifyIcon(SPOTIFY_ICONS.rowPlay, 12),
+      );
+      const row = h("button", {
+        class: `spotify-queue-item${index === 0 ? " is-next" : ""}`,
+        type: "button",
+        title: item.uri ? `Play ${item.name}` : `${item.name} cannot be selected from this queue`,
+        "aria-label": `Play ${item.name} by ${item.artists}`,
+        disabled: !item.uri,
+        onclick: () => {
+          if (item.uri) void spotifyAction("play_track", undefined, item.uri);
+        },
+      },
+      thumbnail,
+      h("span", { class: "spotify-queue-copy" },
+        h("b", { text: item.name }),
+        h("small", { text: item.artists }),
+      ),
+      index === 0
+        ? h("span", { class: "spotify-equalizer", "aria-label": "Next track" },
+          h("i"), h("i"), h("i"),
+        )
+        : numberBadge,
+      h("small", { class: "spotify-queue-duration", text: formatPlaybackTime(item.durationMs) }),
+      );
+      row.style.setProperty("--spotify-row-index", String(index));
+      queueList.append(row);
+    });
+  } else {
+    queueList.append(h("small", { class: "spotify-queue-empty", text: "Queue is empty" }));
+  }
+  queueRows.append(queueHeader, queueList);
+
+  const artwork = track.imageUrl
+    ? h("img", {
+      class: `spotify-artwork${data.playing ? " is-playing" : ""}`,
+      src: track.imageUrl,
+      alt: "Album artwork",
+    })
+    : h("div", {
+      class: `spotify-artwork spotify-artwork-empty${data.playing ? " is-playing" : ""}`,
+      text: "♪",
+    });
+  const nowPlaying = h("div", { class: "spotify-now-playing" },
+    artwork,
+    h("div", { class: "spotify-track" },
+      h("b", { text: track.name }),
+      h("span", { text: track.artists }),
+    ),
+  );
+  const timeline = h("div", { class: "spotify-timeline" },
+    h("span", { text: formatPlaybackTime(data.progressMs) }),
+    seek,
+    h("span", { text: formatPlaybackTime(track.durationMs) }),
+  );
+  return h(
+    "div",
+    { class: "int-card spotify-card" },
+    header("#1DB954", "Spotify", "Now playing"),
+    error ? h("div", { class: "int-status", text: error }) : null,
+    nowPlaying,
+    timeline,
+    controls,
+    queueRows,
+  );
+}
+
+export function renderIntegrationCard(task: AgentTask, hooks: IntegrationCardHooks): HTMLElement {
+  if (task.id === "integration_messages") return messagesCard(hooks.openSettings);
+  if (task.id === "integration_spotify") return spotifyCard(hooks.openSettings);
   if (task.id === "integration_vercel" && hasIntegrationData(task.id)) {
     return hooks.detailOpen ? vercelDetail(hooks.closeDetail) : vercelCard(hooks.openDetail);
   }
   if (!hasIntegrationData(task.id)) return idleCard(task, hooks.openSettings);
 
   switch (task.id) {
-    case "integration_resend":
-      return resendCard();
     case "integration_github":
       return githubCard();
     case "integration_stripe":

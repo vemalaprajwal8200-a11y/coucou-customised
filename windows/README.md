@@ -122,6 +122,39 @@ local actions.
 No telemetry. The only network requests Coucou makes are to the services you
 configure yourself.
 
+## Messages and Spotify
+
+**Messages** uses Windows' notification listener and therefore requires the
+packaged MSIX build; the regular NSIS installer and development build do not
+have the package identity Windows requires. In **Settings → Integrations**,
+choose **Allow Windows notifications** and approve access in Windows. Coucou
+shows notifications from all apps in the island for about three seconds.
+Clicking one opens its source app; Windows does not expose a reliable way for
+every app to reopen an individual toast. Turn off banners for apps in Windows
+notification settings if you want to avoid seeing both Coucou and Windows
+notifications.
+
+**Spotify** uses the Spotify Web API. Create an app in the Spotify Developer
+Dashboard, add `http://127.0.0.1:43821/callback` as a redirect URI, save its
+Client ID in **Settings → Integrations**, then click **Connect Spotify** and
+approve access in your browser. OAuth tokens are stored in Windows Credential
+Manager. The Spotify account needs Premium for playback control; current track,
+cover art, progress, controls, and the next tracks in the queue are shown in the
+island.
+
+To build an MSIX with the notification-listener capability, install the Windows
+10/11 SDK and a signing certificate with its private key in the current user's
+certificate store, then run:
+
+```powershell
+npm run pack:msix -- -CertificateThumbprint YOUR_CERTIFICATE_THUMBPRINT
+```
+
+The signed package is written to `windows/target/msix/`. The publisher in the
+package manifest is taken from the certificate, so Windows will only accept
+updates signed by a certificate with the same publisher identity. WebView2
+Evergreen Runtime must be installed on the machine.
+
 ## Voice control
 
 Voice input runs offline with the local `faster-whisper` model `base.en`;
@@ -137,8 +170,9 @@ on-device.
 
 The **Wake phrase "Hey Macha"** setting is enabled by default. While enabled,
 Coucou listens locally for speech and sends completed speech segments only to
-the local Whisper service. Say **“Hey Macha, [your question]”** in one go, or say
-“Hey Macha” and ask within ten seconds. For better recognition on your
+the local Whisper service. Say **“Hey Macha, [your question]”** in one go, or
+call **“Macha”** and then ask after it acknowledges you. Short pauses between
+the wake words are combined automatically. For better recognition on your
 microphone, choose **Settings… → General → Record “Hey Macha”** and repeat the
 phrase during the five-second recording. Coucou uses the local Whisper result as
 a recognition hint and tunes the microphone speech threshold; the recording is
@@ -164,8 +198,10 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Coucou starts the transcription service when it launches. If automatic startup
-is unavailable, run `start_stt.bat` from the repository root. Press
+Coucou starts the transcription service when it launches. The wake listener
+waits for the local model to finish loading and retries automatically if startup
+takes longer than expected. If automatic startup is unavailable, run
+`start_stt.bat` from the repository root. Press
 **Ctrl+Alt+Space** or the **Voice** button beside the chat input to start
 recording; press it again to stop and send the recognized text through chat.
 In automatic provider mode, voice requests try the configured OpenRouter model
@@ -185,6 +221,7 @@ cd windows
 npm install
 npm run tauri dev      # live-reloading development build
 npm run pack           # builds the installer and drops it in windows/release/
+npm run pack:msix -- -CertificateThumbprint YOUR_CERTIFICATE_THUMBPRINT # signed MSIX with notification access
 ```
 
 `npm run dev` alone serves the front end in an ordinary browser, which is enough
@@ -224,8 +261,9 @@ windows/
     views/             every island view
     settings/          the settings window
   src-tauri/           Rust backend: window, named pipe, Claude API, pollers
+    msix/              package manifest and notification-listener capability
   hook/                coucou-hook.exe, the Claude Code relay
-  scripts/             icon generator
+  scripts/             icon generator and MSIX packager
 ```
 
 ### Log

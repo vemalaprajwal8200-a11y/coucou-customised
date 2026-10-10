@@ -126,8 +126,12 @@ pub fn no_console(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-pub fn open_url(url: &str) {
-    let _ = Command::new("xdg-open").arg(url).spawn();
+pub fn open_url(url: &str) -> Result<(), String> {
+    Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not open the URL in the default browser: {error}"))
 }
 
 pub fn reveal_folder(path: &str) {

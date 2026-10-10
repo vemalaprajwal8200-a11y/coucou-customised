@@ -5,7 +5,7 @@ import { Tracked, Spring, clamp } from "../core/anim";
 import { Bridge, IS_TAURI, onDragDrop } from "../core/bridge";
 import {
   EXPANDED_CORNER, EXPANDED_W, NOTCH_W, PANEL_H, PANEL_W,
-  ROUNDED_CORNER, VIEW_LAYOUTS, botGlowColor, botGlowOpacity, botPosition, chatPromptHeight,
+  ROUNDED_CORNER, botGlowColor, botGlowOpacity, botPosition, chatPromptHeight,
   islandSize,
   type IslandMode, type IslandViewName,
 } from "../core/layout";
@@ -69,6 +69,7 @@ export class Island {
   // Rust starts the window at full size so the launch greeting has room.
   private collapsed = false;
   private collapseTimer: number | null = null;
+  private messageHideTimer: number | null = null;
   private wasInIsland = false;
   /** Last shape handed to Rust for the click-through test. */
   private pushedRect = { x: -1, y: -1, w: -1, h: -1 };
@@ -120,6 +121,9 @@ export class Island {
       collapse: () => this.collapse(),
       setFocus: (id) => {
         State.setFocus(id);
+        if (State.mode === "expanded" && State.view === "overview") {
+          this.animateGeometry(false);
+        }
         Sound.play("blip");
       },
       openTerminal: () => {
@@ -131,7 +135,6 @@ export class Island {
         const task = State.focusTask;
         if (!task) return;
         const urls: Record<string, string> = {
-          integration_resend: "https://resend.com/emails",
           integration_vercel: "https://vercel.com/dashboard",
           integration_github: "https://github.com",
           integration_stripe: "https://dashboard.stripe.com/payments",
@@ -139,7 +142,6 @@ export class Island {
           integration_calcom: "https://app.cal.com/bookings",
         };
         if (task.id === "integration_claude") void Bridge.openInVSCode(task.sessionCwd ?? null);
-        else if (task.id === "integration_n8n") void Bridge.openN8n();
         else if (urls[task.id]) void Bridge.openUrl(urls[task.id]);
       },
       openUrl: (url) => {
@@ -318,8 +320,9 @@ export class Island {
       State.notify();
       return;
     }
-    const grew = VIEW_LAYOUTS[view].height >= VIEW_LAYOUTS[State.view].height;
+    const currentHeight = this.targetSize().h;
     State.view = view;
+    const grew = this.targetSize().h >= currentHeight;
     State.lastActivity = performance.now();
     this.animateGeometry(!grew);
     State.notify();
@@ -341,6 +344,40 @@ export class Island {
     this.expand(view);
   }
 
+  showMessageNotification() {
+    if (State.isPinned) return;
+    const info = State.integrations.integration_messages;
+    const notifications = Array.isArray(info?.data.notifications)
+      ? info.data.notifications
+      : [];
+    if (!notifications.length) return;
+    if (this.messageHideTimer !== null) return;
+    State.setFocus("integration_messages");
+    this.alert("overview");
+    this.scheduleMessageNotificationAdvance();
+  }
+
+  private scheduleMessageNotificationAdvance() {
+    this.messageHideTimer = window.setTimeout(() => {
+      this.messageHideTimer = null;
+      if (State.isPinned) return;
+      const info = State.integrations.integration_messages;
+      const notifications = Array.isArray(info?.data.notifications)
+        ? info.data.notifications
+        : [];
+      if (notifications.length > 1) {
+        const remaining = notifications.slice(1);
+        info.data = { ...info.data, notification: remaining[0], notifications: remaining };
+        State.notify();
+        this.scheduleMessageNotificationAdvance();
+      } else {
+        if (info) info.data = { ...info.data, notification: null, notifications: [] };
+        State.notify();
+        this.collapse();
+      }
+    }, 3000);
+  }
+
   reveal() {
     this.fsm.reveal();
   }
@@ -348,7 +385,13 @@ export class Island {
   /** An alert stopped waiting for an answer: let the island auto-close again. */
   dropPin() {
     this.fsm.pinned = false;
-    if (!this.wasInIsland) this.fsm.mouseLeft();
+    if (State.integrations.integration_messages?.data.notifications
+      && Array.isArray(State.integrations.integration_messages.data.notifications)
+      && State.integrations.integration_messages.data.notifications.length > 0) {
+      this.showMessageNotification();
+    } else if (!this.wasInIsland) {
+      this.fsm.mouseLeft();
+    }
   }
 
   // ── File drop ───────────────────────────────────────────────────────────────
@@ -464,9 +507,16 @@ export class Island {
   // ── Geometry ────────────────────────────────────────────────────────────────
 
   private targetSize(): { w: number; h: number; r: number } {
-    const { w, h } = islandSize(State.mode, State.view, State.chatHistory.length);
+    const size = islandSize(State.mode, State.view, State.chatHistory.length);
+    if (
+      State.mode === "expanded"
+      && State.view === "overview"
+      && State.focusTask?.id === "integration_spotify"
+    ) {
+      size.h = PANEL_H;
+    }
     const r = State.mode === "expanded" ? EXPANDED_CORNER : ROUNDED_CORNER;
-    return { w, h, r };
+    return { w: size.w, h: size.h, r };
   }
 
   private animateGeometry(shrinking: boolean) {

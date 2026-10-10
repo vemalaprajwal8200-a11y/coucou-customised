@@ -100,13 +100,13 @@ impl Default for Settings {
             auto_close_interval: 15.0,
             absence_interval: 180.0,
             active_integrations: vec![
-                "integration_resend".into(),
-                "integration_n8n".into(),
+                "integration_messages".into(),
+                "integration_spotify".into(),
                 "integration_vercel".into(),
                 "integration_github".into(),
             ],
             screen: "primary".into(),
-            autostart: false,
+            autostart: true,
             hooks_installed: false,
             auto_hide: default_auto_hide(),
             model: default_model(),
@@ -149,7 +149,22 @@ pub fn load() -> Settings {
         Err(_) => Settings::default(),
     };
     settings.model = migrate_model(settings.model);
+    migrate_integrations(&mut settings);
     settings
+}
+
+fn migrate_integrations(settings: &mut Settings) {
+    for (old, new) in [
+        ("integration_resend", "integration_messages"),
+        ("integration_n8n", "integration_spotify"),
+    ] {
+        if settings.active_integrations.iter().any(|id| id == old) {
+            settings.active_integrations.retain(|id| id != old);
+            if !settings.active_integrations.iter().any(|id| id == new) {
+                settings.active_integrations.push(new.into());
+            }
+        }
+    }
 }
 
 fn migrate_speech_settings(settings: &mut Settings, document: &serde_json::Value) {
@@ -193,8 +208,8 @@ pub fn save(settings: &Settings) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_auto_hide, default_model, default_speak_replies_mode, migrate_model,
-        migrate_speech_settings, Settings,
+        default_auto_hide, default_model, default_speak_replies_mode, migrate_integrations,
+        migrate_model, migrate_speech_settings, Settings,
     };
 
     #[test]
@@ -248,5 +263,30 @@ mod tests {
     fn auto_hide_is_enabled_by_default() {
         assert!(default_auto_hide());
         assert!(super::Settings::default().auto_hide);
+    }
+
+    #[test]
+    fn autostart_is_enabled_by_default() {
+        assert!(super::Settings::default().autostart);
+    }
+
+    #[test]
+    fn replaced_integrations_migrate_without_duplicates() {
+        let mut settings = Settings::default();
+        settings.active_integrations = vec![
+            "integration_resend".into(),
+            "integration_n8n".into(),
+            "integration_vercel".into(),
+            "integration_messages".into(),
+        ];
+        migrate_integrations(&mut settings);
+        assert_eq!(
+            settings.active_integrations,
+            [
+                "integration_vercel",
+                "integration_messages",
+                "integration_spotify",
+            ]
+        );
     }
 }

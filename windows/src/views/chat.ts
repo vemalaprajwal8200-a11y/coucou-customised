@@ -15,7 +15,12 @@ import { Sound } from "../core/sound";
 import { State, type ChatMessage } from "../core/state";
 import { sanitizeAssistantText } from "../core/text";
 import * as TTS from "../core/tts";
-import { createWakeWordListener, extractWakeCommand } from "../core/wakeWord";
+import {
+  createWakeWordListener,
+  extractWakeCommand,
+  isPartialWakePhrase,
+  SpeechServiceUnavailableError,
+} from "../core/wakeWord";
 import type { ViewHost } from "./views";
 
 let nextId = 1;
@@ -27,6 +32,9 @@ const VOICE_VAD_POLL_MS = 50;
 const VOICE_NOISE_CALIBRATION_MS = 300;
 const VOICE_NO_SPEECH_TIMEOUT_MS = 10_000;
 const VOICE_MAX_RECORDING_MS = 30_000;
+const WAKE_RETRY_INITIAL_MS = 2_000;
+const WAKE_RETRY_MAX_MS = 30_000;
+const WAKE_PARTIAL_TIMEOUT_MS = 3_000;
 type VoiceState = "idle" | "wake" | "listening" | "transcribing" | "speaking";
 
 function newRequestId(): string {
@@ -265,6 +273,10 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
   const wakeWord = createWakeWordListener();
   let wakeWordReady = false;
   let wakeWordStarting = false;
+  let wakeWordRetryTimer: number | null = null;
+  let wakeWordRetryAttempt = 0;
+  let partialWakeTranscript = "";
+  let partialWakeTimer: number | null = null;
   let lastWakeWordEnabled = State.settings.wakeWordEnabled;
   let lastWakePronunciation = State.settings.wakeWordPronunciation;
   let lastWakeThreshold = State.settings.wakeWordThreshold;
@@ -365,6 +377,39 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       window.clearTimeout(wakeFeedbackTimer);
       wakeFeedbackTimer = null;
     }
+    clearPartialWakeTranscript();
+  }
+
+  function clearPartialWakeTranscript() {
+    if (partialWakeTimer !== null) {
+      window.clearTimeout(partialWakeTimer);
+      partialWakeTimer = null;
+    }
+    partialWakeTranscript = "";
+  }
+
+  function rememberPartialWakeTranscript(transcript: string) {
+    clearPartialWakeTranscript();
+    partialWakeTranscript = transcript;
+    partialWakeTimer = window.setTimeout(clearPartialWakeTranscript, WAKE_PARTIAL_TIMEOUT_MS);
+  }
+
+  function clearWakeWordRetry() {
+    if (wakeWordRetryTimer !== null) {
+      window.clearTimeout(wakeWordRetryTimer);
+      wakeWordRetryTimer = null;
+    }
+  }
+
+  function retryWakeWordStart() {
+    if (wakeWordRetryTimer !== null) return;
+    const delay = Math.min(WAKE_RETRY_INITIAL_MS * 2 ** wakeWordRetryAttempt, WAKE_RETRY_MAX_MS);
+    wakeWordRetryAttempt += 1;
+    setVoiceState("idle", "Local speech service is still starting; retrying Hey Macha.");
+    wakeWordRetryTimer = window.setTimeout(() => {
+      wakeWordRetryTimer = null;
+      void reconcileWakeWord();
+    }, delay);
   }
 
   function holdWakeConversation() {
@@ -389,11 +434,16 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     }, 1_000);
   }
 
+  function canRunWakeWord(): boolean {
+    return wakeWordReady && State.settings.wakeWordEnabled && IS_TAURI && !sending && !wakeCalibrationActive
+      && !wakeConversationCompleted && !pendingAction && !actionConfirmationActive
+      && voiceState !== "listening" && voiceState !== "transcribing"
+      && voiceState !== "speaking" && !TTS.isSpeaking();
+  }
+
   async function reconcileWakeWord() {
-    if (!wakeWordReady || !State.settings.wakeWordEnabled || !IS_TAURI || sending || wakeCalibrationActive
-      || wakeConversationCompleted || !!pendingAction || actionConfirmationActive
-      || voiceState === "listening" || voiceState === "transcribing"
-      || voiceState === "speaking" || TTS.isSpeaking()) {
+    if (!canRunWakeWord()) {
+      clearWakeWordRetry();
       if (wakeWord.isActive()) wakeWord.stop();
       if (voiceState === "wake") setVoiceState("idle");
       return;
@@ -419,8 +469,16 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
         State.settings.wakeWordPronunciation,
         State.settings.wakeWordThreshold,
       );
-      if (wakeWord.isActive()) setVoiceState("wake", 'Say "Hey Macha" to ask a question.');
+      if (wakeWord.isActive()) {
+        clearWakeWordRetry();
+        wakeWordRetryAttempt = 0;
+        setVoiceState("wake", 'Say "Hey Macha" to ask a question.');
+      }
     } catch (error) {
+      if (error instanceof SpeechServiceUnavailableError) {
+        if (canRunWakeWord()) retryWakeWordStart();
+        return;
+      }
       const name = error instanceof DOMException ? error.name : "";
       const message = name === "NotAllowedError" || name === "SecurityError"
         ? 'Microphone permission denied. Allow microphone access to use "Hey Macha".'
@@ -435,9 +493,16 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
   }
 
   async function onWakeUtterance(transcript: string) {
-    const command = extractWakeCommand(transcript, State.settings.wakeWordPronunciation);
+    const combinedTranscript = partialWakeTranscript
+      ? `${partialWakeTranscript} ${transcript}`
+      : transcript;
+    clearPartialWakeTranscript();
+    const pronunciation = State.settings.wakeWordPronunciation;
+    const command = extractWakeCommand(combinedTranscript, pronunciation);
     if (command === null) {
-      releaseWakeConversation();
+      if (isPartialWakePhrase(combinedTranscript, pronunciation)) {
+        rememberPartialWakeTranscript(combinedTranscript);
+      }
       return;
     }
 
@@ -489,6 +554,8 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     lastWakeThreshold = State.settings.wakeWordThreshold;
     if (phraseChanged && wakeWord.isActive()) wakeWord.stop();
     if (!lastWakeWordEnabled) {
+      clearWakeWordRetry();
+      wakeWordRetryAttempt = 0;
       stopWakeWord();
       setVoiceState("idle");
     } else {
@@ -986,7 +1053,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     actionConfirmationStage = "confirm";
     const safeReplyText = sanitizeAssistantText(reply.text);
     const content = safeReplyText || (reply.action
-      ? `Mochi is asking to ${actionDescription(reply.action)}.`
+      ? `Macha is asking to ${actionDescription(reply.action)}.`
       : "");
     if (content) {
       State.chatHistory.push({

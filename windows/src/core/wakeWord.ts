@@ -12,9 +12,16 @@ const MAX_SPEECH_MS = 12_000;
 const CALIBRATION_MS = 5000;
 const FILLER_WORDS = new Set(["um", "uh", "oh", "ah", "er", "okay", "ok", "so", "well"]);
 
-async function waitForSttReady(): Promise<void> {
+export class SpeechServiceUnavailableError extends Error {
+  constructor() {
+    super("Local speech service is not ready. Start Coucou with the voice service running.");
+    this.name = "SpeechServiceUnavailableError";
+  }
+}
+
+async function waitForSttReady(isCurrentRun: () => boolean): Promise<void> {
   const deadline = performance.now() + STT_STARTUP_TIMEOUT_MS;
-  while (performance.now() < deadline) {
+  while (isCurrentRun() && performance.now() < deadline) {
     try {
       const response = await fetch(STT_HEALTH_ENDPOINT, { signal: AbortSignal.timeout(1_000) });
       if (response.ok) return;
@@ -23,22 +30,24 @@ async function waitForSttReady(): Promise<void> {
     }
     await new Promise((resolve) => window.setTimeout(resolve, STT_STARTUP_RETRY_MS));
   }
-  throw new Error("Local speech service is not ready. Start Coucou with the voice service running.");
+  if (isCurrentRun()) throw new SpeechServiceUnavailableError();
 }
 
 const WAKE_WORD_VARIANTS: Record<string, readonly string[]> = {
-  hey: ["hey", "hay", "hai", "hi", "he", "ay"],
-  hay: ["hey", "hay", "hai", "hi", "he", "ay"],
-  hai: ["hey", "hay", "hai", "hi", "he", "ay"],
-  hi: ["hey", "hay", "hai", "hi", "he", "ay"],
-  he: ["hey", "hay", "hai", "hi", "he", "ay"],
-  ay: ["hey", "hay", "hai", "hi", "he", "ay"],
-  macha: ["macha", "matcha", "masha", "machaa", "macho", "mocha", "mark"],
-  matcha: ["macha", "matcha", "masha", "machaa", "macho", "mocha", "mark"],
-  masha: ["macha", "matcha", "masha", "machaa", "macho", "mocha", "mark"],
-  machaa: ["macha", "matcha", "masha", "machaa", "macho", "mocha", "mark"],
-  macho: ["macha", "matcha", "masha", "machaa", "macho", "mocha", "mark"],
-  mocha: ["macha", "matcha", "masha", "machaa", "macho", "mocha", "mark"],
+  hey: ["hey", "hay", "hai", "hi", "he", "ay", "a"],
+  hay: ["hey", "hay", "hai", "hi", "he", "ay", "a"],
+  hai: ["hey", "hay", "hai", "hi", "he", "ay", "a"],
+  hi: ["hey", "hay", "hai", "hi", "he", "ay", "a"],
+  he: ["hey", "hay", "hai", "hi", "he", "ay", "a"],
+  ay: ["hey", "hay", "hai", "hi", "he", "ay", "a"],
+  a: ["hey", "hay", "hai", "hi", "he", "ay", "a"],
+  macha: ["macha", "matcha", "masha", "machaa", "maccha", "macho", "mocha", "mark"],
+  matcha: ["macha", "matcha", "masha", "machaa", "maccha", "macho", "mocha", "mark"],
+  masha: ["macha", "matcha", "masha", "machaa", "maccha", "macho", "mocha", "mark"],
+  machaa: ["macha", "matcha", "masha", "machaa", "maccha", "macho", "mocha", "mark"],
+  maccha: ["macha", "matcha", "masha", "machaa", "maccha", "macho", "mocha", "mark"],
+  macho: ["macha", "matcha", "masha", "machaa", "maccha", "macho", "mocha", "mark"],
+  mocha: ["macha", "matcha", "masha", "machaa", "maccha", "macho", "mocha", "mark"],
 };
 
 function wakeWords(value: string): string[] {
@@ -52,6 +61,20 @@ function configuredWakeWords(pronunciation: string): string[] {
 
 function wakeWordMatches(actual: string, configured: string): boolean {
   return (WAKE_WORD_VARIANTS[configured] ?? [configured]).includes(actual);
+}
+
+function wakeNameEnd(
+  actual: RegExpMatchArray[],
+  start: number,
+  configuredName: string,
+): number | null {
+  if (start >= actual.length) return null;
+  if (wakeWordMatches(actual[start][0].toLocaleLowerCase(), configuredName)) return start;
+  if (configuredName === "macha" && actual[start][0].toLocaleLowerCase() === "ma"
+    && actual[start + 1]?.[0].toLocaleLowerCase() === "cha") {
+    return start + 1;
+  }
+  return null;
 }
 
 function tokenStart(tokens: RegExpMatchArray[]): number {
@@ -69,13 +92,29 @@ export function extractWakeCommand(
   const actual = [...transcript.matchAll(/[\p{L}\p{N}]+/gu)];
   const expected = configuredWakeWords(pronunciation);
   const start = tokenStart(actual);
-  if (actual.length - start < expected.length) return null;
-  for (const [index, word] of expected.entries()) {
-    if (!wakeWordMatches(actual[start + index][0].toLocaleLowerCase(), word)) return null;
+  let nameEnd: number | null = null;
+  if (actual[start] && wakeWordMatches(actual[start][0].toLocaleLowerCase(), expected[0])) {
+    nameEnd = wakeNameEnd(actual, start + 1, expected[1]);
   }
-  const last = actual[start + expected.length - 1];
-  const phraseEnd = last.index! + last[0].length;
+  if (nameEnd === null) nameEnd = wakeNameEnd(actual, start, expected[1]);
+  if (nameEnd === null) return null;
+  const phraseEnd = actual[nameEnd].index! + actual[nameEnd][0].length;
   return transcript.slice(phraseEnd).replace(/^[\s,:;.!?-]+/, "").trim();
+}
+
+export function isPartialWakePhrase(transcript: string, pronunciation = "Hey Macha"): boolean {
+  const actual = [...transcript.matchAll(/[\p{L}\p{N}]+/gu)];
+  const expected = configuredWakeWords(pronunciation);
+  const start = tokenStart(actual);
+  if (actual.length - start === 1) {
+    const word = actual[start][0].toLocaleLowerCase();
+    return wakeWordMatches(word, expected[0])
+      || (expected[1] === "macha" && word === "ma");
+  }
+  return actual.length - start === 2
+    && wakeWordMatches(actual[start][0].toLocaleLowerCase(), expected[0])
+    && expected[1] === "macha"
+    && actual[start + 1][0].toLocaleLowerCase() === "ma";
 }
 
 export function isWakeLeadOnly(transcript: string, pronunciation = "Hey Macha"): boolean {
@@ -242,7 +281,7 @@ export async function recordWakePronunciation(): Promise<WakeWordCalibration> {
     const calibrationAudio = new Blob(audioChunks, { type: mimeType });
     const transcript = await transcribeWakeClip(calibrationAudio, "Hey Macha");
     const phrase = transcript.match(
-      /\b(hey|hay|hai|hi|he|ay)\s+(macha|matcha|masha|ma\s+cha|machaa|macho|mocha)\b/i,
+      /\b(hey|hay|hai|hi|he|ay|a)\s+(macha|matcha|masha|ma\s+cha|machaa|maccha|macho|mocha)\b/i,
     );
     if (!phrase) {
       throw new Error(`Whisper heard “${transcript}”. Please try again and say “Hey Macha”.`);
@@ -279,7 +318,6 @@ export function createWakeWordListener(): WakeWordListener {
   let preRollSamples = 0;
   let speechStartedAt = 0;
   let speechSilenceMs = 0;
-  let wakeWindowSent = false;
   let active = false;
   let requestRunning = false;
   let generation = 0;
@@ -343,7 +381,6 @@ export function createWakeWordListener(): WakeWordListener {
       if (activeRequest === controller) {
         activeRequest = null;
         requestRunning = false;
-        wakeWindowSent = false;
       }
       void transcribePendingAudio();
     }
@@ -360,7 +397,7 @@ export function createWakeWordListener(): WakeWordListener {
     if (!active || generation !== run || durationMs < MIN_SPEECH_MS || !frames.length) return;
     pendingAudio.push({ audio: encodeWav(frames, sampleRate), run });
     if (useWakeHint) {
-      while (pendingAudio.length > 1) pendingAudio.shift();
+      while (pendingAudio.length > 3) pendingAudio.shift();
     } else if (pendingAudio.length > 3) {
       pendingAudio.shift();
       onError?.("Wake-word transcription is busy; please try again.");
@@ -369,7 +406,7 @@ export function createWakeWordListener(): WakeWordListener {
   }
 
   function finishUtterance(run: number, sampleRate: number) {
-    if (!speechStartedAt || wakeWindowSent) {
+    if (!speechStartedAt) {
       resetUtterance();
       return;
     }
@@ -380,12 +417,11 @@ export function createWakeWordListener(): WakeWordListener {
   }
 
   function finishWakeWindow(run: number, sampleRate: number) {
-    if (!speechStartedAt || wakeWindowSent) return;
+    if (!speechStartedAt) return;
     const durationMs = performance.now() - speechStartedAt;
     const utterance = speechFrames.slice();
     resetUtterance();
     if (durationMs < MIN_SPEECH_MS || !utterance.length) return;
-    wakeWindowSent = true;
     enqueueUtterance(run, sampleRate, utterance, durationMs);
   }
 
@@ -416,7 +452,6 @@ export function createWakeWordListener(): WakeWordListener {
     resetUtterance();
     preRollFrames = [];
     preRollSamples = 0;
-    wakeWindowSent = false;
   }
 
   return {
@@ -425,7 +460,7 @@ export function createWakeWordListener(): WakeWordListener {
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error("Always-listening microphone is not available in this window.");
       }
-      await waitForSttReady();
+      const run = ++generation;
       onWakeActivity = onActivity;
       onUtterance = onText;
       onError = onFailure;
@@ -434,8 +469,9 @@ export function createWakeWordListener(): WakeWordListener {
       threshold = Number.isFinite(speechThreshold)
         ? Math.max(0.002, Math.min(0.02, speechThreshold * 0.65))
         : DEFAULT_SPEECH_THRESHOLD;
-      const run = ++generation;
       try {
+        await waitForSttReady(() => generation === run);
+        if (generation !== run) return;
         stream = await navigator.mediaDevices.getUserMedia({
           audio: {
             channelCount: 1,
@@ -469,20 +505,6 @@ export function createWakeWordListener(): WakeWordListener {
           const samples = event.inputBuffer.getChannelData(0);
           const copy = new Float32Array(samples);
           const frameMs = copy.length * 1000 / context!.sampleRate;
-
-          // While a wake-hint request is in flight or the wake window has already
-          // been submitted, keep the pre-roll buffer fresh so the *next* utterance
-          // starts with proper context, but do not start accumulating speech frames.
-          if (useWakeHint && (wakeWindowSent || requestRunning)) {
-            if (!speechStartedAt) {
-              preRollFrames.push(copy);
-              preRollSamples += copy.length;
-              while (preRollSamples > preRollLimit && preRollFrames.length) {
-                preRollSamples -= preRollFrames.shift()!.length;
-              }
-            }
-            return;
-          }
 
           const speaking = streamRms(copy) >= threshold;
           if (speaking) {

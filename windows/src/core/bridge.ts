@@ -36,6 +36,29 @@ export interface OpenRouterAccount {
   name: string;
 }
 
+export interface MessageNotification {
+  id: string;
+  appName: string;
+  title: string;
+  body: string;
+}
+
+export interface SpotifyTrack {
+  name: string;
+  artists: string;
+  imageUrl: string | null;
+  durationMs: number;
+  uri: string | null;
+}
+
+export interface SpotifySnapshot {
+  connected: boolean;
+  playing: boolean;
+  progressMs: number;
+  track: SpotifyTrack | null;
+  queue: SpotifyTrack[];
+}
+
 export const Bridge = {
   boot: () => call<BootInfo>("boot"),
 
@@ -58,6 +81,7 @@ export const Bridge = {
   reposition: () => call<void>("reposition"),
 
   openUrl: (url: string) => call<void>("open_url", { url }),
+  openUrlStrict: (url: string) => callOrThrow<void>("open_url", { url }),
 
   /** "Open terminal" → opens the folder in VS Code when `code` is on PATH. */
   openInVSCode: (path: string | null) => call<boolean>("open_in_vscode", { path }),
@@ -165,8 +189,21 @@ export const Bridge = {
 
   // ── Integrations ──────────────────────────────────────────────────────────
   refreshIntegration: (id: string) => call<void>("refresh_integration", { id }),
-  /** Opens the configured n8n instance in the browser. */
-  openN8n: () => call<void>("open_n8n"),
+  requestMessageAccess: () => callOrThrow<string>("request_message_access"),
+  messageAccessStatus: () => call<boolean>("message_access_status"),
+  openMessageSource: (id: string) =>
+    callOrThrow<void>("open_message_source", { notificationId: id }),
+  spotifyConnect: () => callOrThrow<string>("spotify_connect"),
+  spotifyControl: (
+    action: "play" | "pause" | "next" | "previous" | "seek" | "play_track",
+    positionMs?: number,
+    trackUri?: string,
+  ) => callOrThrow<void>("spotify_control", {
+    action,
+    positionMs: positionMs ?? null,
+    trackUri: trackUri ?? null,
+  }),
+  spotifyDisconnect: () => callOrThrow<void>("spotify_disconnect"),
 
   /** Tray → Pause. Stops the integration pollers, not just the island. */
   setPaused: (paused: boolean) => call<void>("set_paused", { paused }),

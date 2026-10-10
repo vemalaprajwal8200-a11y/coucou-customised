@@ -124,8 +124,8 @@ const task = (
 /** AgentTask.integrationAgents — same ids, names and colours as macOS. */
 export const INTEGRATION_AGENTS: AgentTask[] = [
   task("integration_claude", "VS Code", "#F5F6F8", "claudeCode"),
-  task("integration_resend", "Resend", "#22C55E", "n8n"),
-  task("integration_n8n", "n8n", "#F29B38", "n8n"),
+  task("integration_messages", "Messages", "#22C55E", "agent"),
+  task("integration_spotify", "Spotify", "#1DB954", "agent"),
   task("integration_vercel", "Vercel", "#7C5CFF", "n8n"),
   task("integration_github", "GitHub", "#F4505E", "n8n"),
   task("integration_notion", "Notion", "#8C8C8C", "n8n"),
@@ -134,7 +134,7 @@ export const INTEGRATION_AGENTS: AgentTask[] = [
 ];
 
 export const TOGGLEABLE_INTEGRATION_IDS = [
-  "integration_resend", "integration_n8n", "integration_vercel", "integration_github",
+  "integration_messages", "integration_spotify", "integration_vercel", "integration_github",
   "integration_notion", "integration_calcom", "integration_stripe",
 ];
 
@@ -179,10 +179,10 @@ export const DEFAULT_SETTINGS: Settings = {
   autoCloseInterval: 15,
   absenceInterval: 180,
   activeIntegrations: [
-    "integration_resend", "integration_n8n", "integration_vercel", "integration_github",
+    "integration_messages", "integration_spotify", "integration_vercel", "integration_github",
   ],
   screen: "primary",
-  autostart: false,
+  autostart: true,
   hooksInstalled: false,
   autoHide: true,
   model: "openrouter/free",

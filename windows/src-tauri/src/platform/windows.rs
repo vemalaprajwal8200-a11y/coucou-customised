@@ -77,9 +77,11 @@ pub fn no_console(cmd: &mut Command) -> &mut Command {
     cmd.creation_flags(CREATE_NO_WINDOW)
 }
 
-pub fn open_url(url: &str) {
-    let _ =
-        no_console(Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", url])).spawn();
+pub fn open_url(url: &str) -> Result<(), String> {
+    no_console(Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", url]))
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Could not open the URL in the default browser: {error}"))
 }
 
 pub fn reveal_folder(path: &str) {
